@@ -1440,6 +1440,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d696c370c750c948ada61c69a0ee2cbbb9c50b1019ddb86d9317157a99c2cae"
 
 [[package]]
+name = "blockchain"
+version = "0.0.0"
+dependencies = [
+ "borsh 0.10.3",
+ "bytemuck",
+ "derive_more",
+ "lib 0.0.0",
+ "stdx 0.0.0",
+ "strum 0.25.0",
+]
+
+[[package]]
 name = "bnum"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,7 +1474,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4114279215a005bc675e386011e594e1d9b800918cea18fcadadcce864a2046b"
 dependencies = [
  "borsh-derive 0.10.3",
- "hashbrown 0.13.2",
+ "hashbrown 0.12.3",
 ]
 
 [[package]]
@@ -5631,8 +5643,8 @@ dependencies = [
  "async-trait",
  "futures",
  "hex",
- "ibc 0.15.0",
- "ibc-proto 0.18.0",
+ "ibc 0.47.0",
+ "ibc-proto 0.37.1",
  "ibc-rpc",
  "ics08-wasm",
  "log",
@@ -5640,6 +5652,7 @@ dependencies = [
  "parity-scale-codec",
  "rand 0.8.5",
  "serde",
+ "solana-ibc",
  "subxt",
  "thiserror",
  "tokio",
@@ -5663,16 +5676,14 @@ dependencies = [
  "hex",
  "hyperspace-primitives",
  "ibc 0.15.0",
- "ibc 0.47.0",
  "ibc-primitives",
  "ibc-proto 0.18.0",
- "ibc-proto 0.37.1",
  "ibc-rpc",
  "itertools 0.10.5",
  "k256 0.11.6",
- "lib",
+ "lib 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "log",
- "memory",
+ "memory 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "pallet-ibc",
  "parity-scale-codec",
  "prost 0.11.9",
@@ -5680,12 +5691,13 @@ dependencies = [
  "rand 0.8.5",
  "ripemd",
  "rs_merkle",
- "sealable-trie",
+ "sealable-trie 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "serde",
  "serde_json",
  "sha2 0.10.8",
- "solana-trie",
- "stdx",
+ "solana-ibc",
+ "solana-trie 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
+ "stdx 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "tendermint 0.28.0",
  "tendermint-light-client",
  "tendermint-light-client-verifier 0.28.0",
@@ -6874,6 +6886,19 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 [[package]]
 name = "lib"
 version = "0.0.0"
+dependencies = [
+ "base64 0.21.5",
+ "borsh 0.10.3",
+ "bytemuck",
+ "derive_more",
+ "sha2 0.10.8",
+ "solana-program",
+ "stdx 0.0.0",
+]
+
+[[package]]
+name = "lib"
+version = "0.0.0"
 source = "git+https://github.com/ComposableFi/emulated-light-client.git#e53ecac14ca1967b82cced09b752a31a083ba4ba"
 dependencies = [
  "base64 0.21.5",
@@ -6881,7 +6906,7 @@ dependencies = [
  "derive_more",
  "sha2 0.10.8",
  "solana-program",
- "stdx",
+ "stdx 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
 ]
 
 [[package]]
@@ -7760,6 +7785,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a634b1c61a95585bd15607c6ab0c4e5b226e695ff2800ba0cdccddf208c406c"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memory"
+version = "0.0.0"
+dependencies = [
+ "derive_more",
 ]
 
 [[package]]
@@ -14294,6 +14326,21 @@ dependencies = [
 [[package]]
 name = "sealable-trie"
 version = "0.0.0"
+dependencies = [
+ "ascii 1.1.0",
+ "base64 0.21.5",
+ "bytemuck",
+ "derive_more",
+ "lib 0.0.0",
+ "memory 0.0.0",
+ "sha2 0.10.8",
+ "stdx 0.0.0",
+ "strum 0.25.0",
+]
+
+[[package]]
+name = "sealable-trie"
+version = "0.0.0"
 source = "git+https://github.com/ComposableFi/emulated-light-client.git#e53ecac14ca1967b82cced09b752a31a083ba4ba"
 dependencies = [
  "ascii 1.1.0",
@@ -14301,10 +14348,10 @@ dependencies = [
  "borsh 0.10.3",
  "bytemuck",
  "derive_more",
- "lib",
- "memory",
+ "lib 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
+ "memory 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "sha2 0.10.8",
- "stdx",
+ "stdx 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
  "strum 0.25.0",
 ]
 
@@ -14722,7 +14769,7 @@ dependencies = [
  "bytes",
  "ics23 0.10.0",
  "proptest",
- "rand 0.8.5",
+ "rand 0.4.6",
  "sha2 0.10.8",
  "tendermint 0.28.0",
 ]
@@ -15020,6 +15067,26 @@ dependencies = [
  "quote 1.0.33",
  "rustc_version",
  "syn 2.0.38",
+]
+
+[[package]]
+name = "solana-ibc"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "base64 0.21.5",
+ "blockchain",
+ "bytemuck",
+ "derive_more",
+ "ibc 0.47.0",
+ "ibc-proto 0.37.1",
+ "lib 0.0.0",
+ "memory 0.0.0",
+ "serde",
+ "serde_json",
+ "solana-trie 0.0.0",
+ "stdx 0.0.0",
+ "strum 0.25.0",
 ]
 
 [[package]]
@@ -15500,12 +15567,22 @@ dependencies = [
 [[package]]
 name = "solana-trie"
 version = "0.0.0"
+dependencies = [
+ "lib 0.0.0",
+ "memory 0.0.0",
+ "sealable-trie 0.0.0",
+ "stdx 0.0.0",
+]
+
+[[package]]
+name = "solana-trie"
+version = "0.0.0"
 source = "git+https://github.com/ComposableFi/emulated-light-client.git#e53ecac14ca1967b82cced09b752a31a083ba4ba"
 dependencies = [
- "lib",
- "memory",
- "sealable-trie",
- "stdx",
+ "lib 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
+ "memory 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
+ "sealable-trie 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
+ "stdx 0.0.0 (git+https://github.com/ComposableFi/emulated-light-client.git)",
 ]
 
 [[package]]
@@ -17393,6 +17470,10 @@ dependencies = [
 [[package]]
 name = "stdx"
 version = "0.0.0"
+
+[[package]]
+name = "stdx"
+version = "0.0.0"
 source = "git+https://github.com/ComposableFi/emulated-light-client.git#e53ecac14ca1967b82cced09b752a31a083ba4ba"
 
 [[package]]
@@ -18826,9 +18907,9 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if 0.1.10",
  "digest 0.10.7",
- "rand 0.8.5",
+ "rand 0.4.6",
  "static_assertions",
 ]
 

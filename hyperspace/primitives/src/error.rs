@@ -32,13 +32,16 @@ pub enum Error {
 	Codec(#[from] codec::Error),
 	/// Ibc client error
 	#[error("Ibc client error")]
-	IbcClientError(#[from] ibc::core::ics02_client::error::Error),
+	IbcClientError(ibc::core::ics02_client::error::ClientError),
 	#[error("Ibc channel error")]
-	IbcChannelError(#[from] ibc::core::ics04_channel::error::Error),
+	IbcChannelError(ibc::core::ics04_channel::error::ChannelError),
 	#[error("Ibc connection error")]
-	IbcConnectionError(#[from] ibc::core::ics03_connection::error::Error),
-	#[error("Ibc proof error")]
-	IbcProofError(#[from] ibc::proofs::ProofError),
+	IbcConnectionError(ibc::core::ics03_connection::error::ConnectionError),
+
+	// Removing below since those errors are part of the ChannelError
+
+	// #[error("Ibc proof error")]
+	// IbcProofError(#[from] ibc::core::ics04_channel::error::ChannelError),
 	#[error("Hex decode error")]
 	HexDecode(#[from] hex::FromHexError),
 	#[error("String from utf-8 error")]

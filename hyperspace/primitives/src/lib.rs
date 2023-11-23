@@ -45,29 +45,25 @@ use ibc::applications::transfer::msgs::transfer::MsgTransfer;
 use ibc::{
 	applications::transfer::PrefixedCoin,
 	core::{
-		ics02_client::{
-			client_consensus::ConsensusState as ConsensusStateT,
-			client_state::{ClientState as ClientStateT, ClientType},
-			events::UpdateClient,
-		},
+		events::IbcEvent,
+		ics02_client::{client_type::ClientType, events::UpdateClient, consensus_state::ConsensusState, client_state::ClientStateCommon},
 		ics04_channel::{
 			channel::{ChannelEnd, Order},
-			context::calculate_block_delay,
 			packet::Packet,
+			timeout::TimeoutHeight,
 		},
 		ics23_commitment::commitment::CommitmentPrefix,
 		ics24_host::identifier::{ChannelId, ClientId, ConnectionId, PortId},
+		timestamp::Timestamp,
 	},
-	events::IbcEvent,
-	signer::Signer,
-	timestamp::Timestamp,
-	Height,
+	Height, Signer,
 };
 use ibc_proto::ibc::core::{
 	channel::v1::QueryChannelsResponse, connection::v1::IdentifiedConnection,
 };
 use ibc_rpc::PacketInfo;
-use pallet_ibc::light_clients::{AnyClientMessage, AnyClientState, AnyConsensusState};
+use pallet_ibc::light_clients::AnyClientMessage;
+use solana_ibc::{client_state::AnyClientState, consensus_state::AnyConsensusState};
 
 pub mod error;
 pub mod mock;
@@ -472,7 +468,7 @@ pub trait IbcProvider {
 #[async_trait::async_trait]
 pub trait TestProvider: Chain + Clone + 'static {
 	/// Initiate an ibc transfer on chain.
-	async fn send_transfer(&self, params: MsgTransfer<PrefixedCoin>) -> Result<(), Self::Error>;
+	async fn send_transfer(&self, params: MsgTransfer) -> Result<(), Self::Error>;
 
 	/// Send a packet on an ordered channel
 	async fn send_ordered_packet(
@@ -592,8 +588,9 @@ pub async fn query_undelivered_sequences(
 	source: &impl Chain,
 	sink: &impl Chain,
 ) -> Result<Vec<u64>, anyhow::Error> {
-	let channel_response =
-		source.query_channel_end(source_height, channel_id, port_id.clone()).await?;
+	let channel_response = source
+		.query_channel_end(source_height, channel_id.clone(), port_id.clone())
+		.await?;
 	let channel_end = ChannelEnd::try_from(
 		channel_response
 			.channel
@@ -602,7 +599,7 @@ pub async fn query_undelivered_sequences(
 	.map_err(|e| Error::Custom(e.to_string()))?;
 	// First we fetch all packet commitments from source
 	let seqs = source
-		.query_packet_commitments(source_height, channel_id, port_id.clone())
+		.query_packet_commitments(source_height, channel_id.clone(), port_id.clone())
 		.await?
 		.into_iter()
 		.collect::<Vec<_>>();
@@ -610,6 +607,7 @@ pub async fn query_undelivered_sequences(
 	let counterparty_channel_id = channel_end
 		.counterparty()
 		.channel_id
+		.clone()
 		.ok_or_else(|| Error::Custom("Expected counterparty channel id".to_string()))?;
 	let counterparty_port_id = channel_end.counterparty().port_id.clone();
 
@@ -642,8 +640,9 @@ pub async fn query_undelivered_acks(
 	source: &impl Chain,
 	sink: &impl Chain,
 ) -> Result<Vec<u64>, anyhow::Error> {
-	let channel_response =
-		source.query_channel_end(source_height, channel_id, port_id.clone()).await?;
+	let channel_response = source
+		.query_channel_end(source_height, channel_id.clone(), port_id.clone())
+		.await?;
 	let channel_end = ChannelEnd::try_from(
 		channel_response
 			.channel
@@ -662,6 +661,7 @@ pub async fn query_undelivered_acks(
 	let counterparty_channel_id = channel_end
 		.counterparty()
 		.channel_id
+		.clone()
 		.ok_or_else(|| Error::Custom("Expected counterparty channel id".to_string()))?;
 	let counterparty_port_id = channel_end.counterparty().port_id.clone();
 
@@ -686,17 +686,23 @@ pub async fn query_undelivered_acks(
 
 pub fn packet_info_to_packet(packet_info: &PacketInfo) -> Packet {
 	Packet {
-		sequence: packet_info.sequence.into(),
-		source_port: PortId::from_str(&packet_info.source_port).expect("Port should be valid"),
-		source_channel: ChannelId::from_str(&packet_info.source_channel)
+		seq_on_a: packet_info.sequence.into(),
+		port_id_on_a: PortId::from_str(&packet_info.source_port).expect("Port should be valid"),
+		chan_id_on_a: ChannelId::from_str(&packet_info.source_channel)
 			.expect("Channel should be valid"),
-		destination_port: PortId::from_str(&packet_info.destination_port)
+		port_id_on_b: PortId::from_str(&packet_info.destination_port)
 			.expect("Port should be valid"),
-		destination_channel: ChannelId::from_str(&packet_info.destination_channel)
+		chan_id_on_b: ChannelId::from_str(&packet_info.destination_channel)
 			.expect("Channel should be valid"),
 		data: packet_info.data.clone(),
-		timeout_height: packet_info.timeout_height.clone().into(),
-		timeout_timestamp: Timestamp::from_nanoseconds(packet_info.timeout_timestamp)
+		timeout_height_on_b: TimeoutHeight::At(
+			Height::new(
+				packet_info.timeout_height.revision_number,
+				packet_info.timeout_height.revision_height,
+			)
+			.expect("Invalid Height"),
+		),
+		timeout_timestamp_on_b: Timestamp::from_nanoseconds(packet_info.timeout_timestamp)
 			.expect("Timestamp should be valid"),
 	}
 }
@@ -722,8 +728,9 @@ pub async fn find_suitable_proof_height_for_client(
 	if timestamp_to_match.is_none() {
 		// try to find latest states first, because relayer's strategy is to submit the most
 		// recent ones
-		for height in start_height.revision_height..=latest_client_height.revision_height {
-			let temp_height = Height::new(start_height.revision_number, height);
+		for height in start_height.revision_height()..=latest_client_height.revision_height() {
+			let temp_height =
+				Height::new(start_height.revision_number(), height).expect("Invalid Height");
 			let consensus_state =
 				sink.query_client_consensus(at, client_id.clone(), temp_height).await.ok();
 			let decoded = consensus_state
@@ -746,8 +753,8 @@ pub async fn find_suitable_proof_height_for_client(
 		}
 	} else {
 		let timestamp_to_match = timestamp_to_match.unwrap();
-		let mut start = start_height.revision_height;
-		let mut end = latest_client_height.revision_height;
+		let mut start = start_height.revision_height();
+		let mut end = latest_client_height.revision_height();
 		let mut last_known_valid_height = None;
 		if start > end {
 			return None
@@ -759,7 +766,8 @@ pub async fn find_suitable_proof_height_for_client(
 		);
 		while end - start > 1 {
 			let mid = (end + start) / 2;
-			let temp_height = Height::new(start_height.revision_number, mid);
+			let temp_height =
+				Height::new(start_height.revision_number(), mid).expect("Invalid Height");
 			let consensus_state =
 				sink.query_client_consensus(at, client_id.clone(), temp_height).await.ok();
 			let Some(Ok(consensus_state)) = consensus_state
@@ -788,7 +796,8 @@ pub async fn find_suitable_proof_height_for_client(
 				end = mid;
 			}
 		}
-		let start_height = Height::new(start_height.revision_number, start);
+		let start_height =
+			Height::new(start_height.revision_number(), start).expect("Invalid Height");
 
 		let consensus_state =
 			sink.query_client_consensus(at, client_id.clone(), start_height).await.ok();
@@ -825,7 +834,7 @@ pub async fn query_maximum_height_for_timeout_proofs(
 		let undelivered_sequences = query_undelivered_sequences(
 			source_height,
 			sink_height,
-			channel,
+			channel.clone(),
 			port_id.clone(),
 			source,
 			sink,
@@ -850,7 +859,8 @@ pub async fn query_maximum_height_for_timeout_proofs(
 				let revision_height = send_packet.height.expect("expected height for packet");
 				let sink_client_state = source
 					.query_client_state(
-						Height::new(source_height.revision_number, revision_height),
+						Height::new(source_height.revision_number(), revision_height)
+							.expect("Invalid Height"),
 						sink.client_id(),
 					)
 					.await
@@ -859,14 +869,14 @@ pub async fn query_maximum_height_for_timeout_proofs(
 					AnyClientState::try_from(sink_client_state.client_state?).ok()?;
 				let height = sink_client_state.latest_height();
 				let timestamp_at_creation =
-					sink.query_timestamp_at(height.revision_height).await.ok()?;
+					sink.query_timestamp_at(height.revision_height()).await.ok()?;
 				let period = send_packet.timeout_timestamp.saturating_sub(timestamp_at_creation);
 				if period == 0 {
 					return Some(send_packet.timeout_height.revision_height)
 				}
 				let period = Duration::from_nanos(period);
 				let period =
-					calculate_block_delay(period, sink.expected_block_time()).saturating_add(1);
+					calculate_block_delay(&period, &sink.expected_block_time()).saturating_add(1);
 				let approx_height = revision_height + period;
 				let timeout_height = if send_packet.timeout_height.revision_height < approx_height {
 					send_packet.timeout_height.revision_height
@@ -891,23 +901,36 @@ pub fn filter_events_by_ids(
 	connection_ids: &[ConnectionId],
 	channel_and_port_ids: &HashSet<(ChannelId, PortId)>,
 ) -> bool {
-	use ibc::core::{
-		ics02_client::events::Attributes as ClientAttributes,
-		ics03_connection::events::Attributes as ConnectionAttributes,
-		ics04_channel::events::Attributes as ChannelAttributes,
-	};
+	// use ibc::core::{
+	// 	ics02_client::events::Attributes as ClientAttributes,
+	// 	ics03_connection::events::Attributes as ConnectionAttributes,
+	// 	ics04_channel::events::Attributes as ChannelAttributes,
+	// };
+	pub struct PacketAttributes<'a> {
+		pub port_id_on_a: &'a PortId,
+		pub chan_id_on_a: &'a ChannelId,
+		pub port_id_on_b: &'a PortId,
+		pub chan_id_on_b: &'a ChannelId,
+	}
+	pub struct ConnectionAttributes<'a> {
+		pub connection_id:  Option<&'a ConnectionId>,
+		pub counterparty_connection_id: Option<&'a ConnectionId>,
+	}
+	pub struct ChannelAttributes<'a> {
+		pub channel_id: Option<&'a ChannelId>,
+		pub counterparty_channel_id: Option<&'a ChannelId>,
+	}
 	let channel_ids = channel_and_port_ids
 		.iter()
 		.map(|(channel_id, _)| channel_id)
 		.collect::<Vec<_>>();
 
-	let filter_packet = |packet: &Packet| {
-		channel_and_port_ids.contains(&(packet.source_channel.clone(), packet.source_port.clone())) ||
+	let filter_packet = |packet: &PacketAttributes| {
+		channel_and_port_ids.contains(&(packet.chan_id_on_a.clone(), packet.port_id_on_a.clone())) ||
 			channel_and_port_ids
-				.contains(&(packet.destination_channel.clone(), packet.destination_port.clone()))
+				.contains(&(packet.chan_id_on_b.clone(), packet.port_id_on_b.clone()))
 	};
-	let filter_client_attributes =
-		|packet: &ClientAttributes| client_ids.contains(&packet.client_id);
+	let filter_client_attributes = |client_id: &ClientId| client_ids.contains(client_id);
 	let filter_connection_attributes = |packet: &ConnectionAttributes| {
 		packet
 			.connection_id
@@ -930,40 +953,102 @@ pub fn filter_events_by_ids(
 	};
 
 	let v = match ev {
-		IbcEvent::SendPacket(e) => filter_packet(&e.packet),
-		IbcEvent::WriteAcknowledgement(e) => filter_packet(&e.packet),
-		IbcEvent::TimeoutPacket(e) => filter_packet(&e.packet),
-		IbcEvent::ReceivePacket(e) => filter_packet(&e.packet),
-		IbcEvent::AcknowledgePacket(e) => filter_packet(&e.packet),
-		IbcEvent::TimeoutOnClosePacket(e) => filter_packet(&e.packet),
-		IbcEvent::CreateClient(e) => filter_client_attributes(&e.0),
-		IbcEvent::UpdateClient(e) => filter_client_attributes(&e.common),
-		IbcEvent::UpgradeClient(e) => filter_client_attributes(&e.0),
-		IbcEvent::ClientMisbehaviour(e) => filter_client_attributes(&e.0),
-		IbcEvent::OpenInitConnection(e) => filter_connection_attributes(&e.0),
-		IbcEvent::OpenTryConnection(e) => filter_connection_attributes(&e.0),
-		IbcEvent::OpenAckConnection(e) => filter_connection_attributes(&e.0),
-		IbcEvent::OpenConfirmConnection(e) => filter_connection_attributes(&e.0),
-		IbcEvent::OpenInitChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::OpenTryChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::OpenAckChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::OpenConfirmChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::CloseInitChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::CloseConfirmChannel(e) =>
-			filter_channel_attributes(&ChannelAttributes::from(e.clone())),
-		IbcEvent::PushWasmCode(_) => true,
-		IbcEvent::NewBlock(_) |
-		IbcEvent::AppModule(_) |
-		IbcEvent::Empty(_) |
-		IbcEvent::ChainError(_) => true,
+		IbcEvent::SendPacket(e) => filter_packet(&PacketAttributes {
+			port_id_on_a: e.port_id_on_a(),
+			chan_id_on_a: e.chan_id_on_a(),
+			port_id_on_b: e.port_id_on_b(),
+			chan_id_on_b: e.chan_id_on_b(),
+		}),
+		IbcEvent::WriteAcknowledgement(e) => filter_packet(&PacketAttributes {
+			port_id_on_a: e.port_id_on_a(),
+			chan_id_on_a: e.chan_id_on_a(),
+			port_id_on_b: e.port_id_on_b(),
+			chan_id_on_b: e.chan_id_on_b(),
+		}),
+		IbcEvent::TimeoutPacket(e) => filter_packet(&PacketAttributes {
+			port_id_on_a: e.port_id_on_a(),
+			chan_id_on_a: e.chan_id_on_a(),
+			port_id_on_b: e.port_id_on_b(),
+			chan_id_on_b: e.chan_id_on_b(),
+		}),
+		IbcEvent::ReceivePacket(e) => filter_packet(&PacketAttributes {
+			port_id_on_a: e.port_id_on_a(),
+			chan_id_on_a: e.chan_id_on_a(),
+			port_id_on_b: e.port_id_on_b(),
+			chan_id_on_b: e.chan_id_on_b(),
+		}),
+		IbcEvent::AcknowledgePacket(e) => filter_packet(&PacketAttributes {
+			port_id_on_a: e.port_id_on_a(),
+			chan_id_on_a: e.chan_id_on_a(),
+			port_id_on_b: e.port_id_on_b(),
+			chan_id_on_b: e.chan_id_on_b(),
+		}),
+		IbcEvent::CreateClient(e) => filter_client_attributes(&e.client_id()),
+		IbcEvent::UpdateClient(e) => filter_client_attributes(&e.client_id()),
+		IbcEvent::UpgradeClient(e) => filter_client_attributes(&e.client_id()),
+		IbcEvent::ClientMisbehaviour(e) => filter_client_attributes(&e.client_id()),
+		IbcEvent::OpenInitConnection(e) => filter_connection_attributes(&ConnectionAttributes {
+			connection_id: Some(e.conn_id_on_a()),
+			counterparty_connection_id: e.conn_id_on_b(),
+		}),
+		IbcEvent::OpenTryConnection(e) => filter_connection_attributes(&ConnectionAttributes {
+			connection_id: e.conn_id_on_a(),
+			counterparty_connection_id: Some(e.conn_id_on_b()),
+		}),
+		IbcEvent::OpenAckConnection(e) => filter_connection_attributes(&ConnectionAttributes {
+			connection_id: Some(e.conn_id_on_a()),
+			counterparty_connection_id: e.conn_id_on_b(),
+		}),
+		IbcEvent::OpenConfirmConnection(e) => filter_connection_attributes(&ConnectionAttributes {
+			connection_id: e.conn_id_on_a(),
+			counterparty_connection_id: Some(e.conn_id_on_b()),
+		}),
+		IbcEvent::OpenInitChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: None,
+		}),
+		IbcEvent::OpenTryChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::OpenAckChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::OpenConfirmChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::CloseInitChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::CloseConfirmChannel(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: Some(e.chan_id_on_a()),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::ChannelClosed(e) => filter_channel_attributes(&ChannelAttributes {
+			channel_id: e.chan_id_on_a(),
+			counterparty_channel_id: Some(e.chan_id_on_b()),
+		}),
+		IbcEvent::Module(_) => true, 
+		IbcEvent::Message(_) => true,
 	};
 	if !v {
 		log::debug!(target: "hyperspace_parachain", "Filtered out event: {:?}", ev);
 	}
 	v
 }
+
+fn calculate_block_delay(
+	delay_period_time: &Duration,
+	max_expected_time_per_block: &Duration,
+) -> u64 {
+	if max_expected_time_per_block.is_zero() {
+			return 0;
+	}
+	let delay = delay_period_time.as_secs_f64() /
+			max_expected_time_per_block.as_secs_f64();
+	delay.ceil() as u64
+}
+

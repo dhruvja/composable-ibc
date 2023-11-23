@@ -22,11 +22,14 @@ serde = "1.0.163"
 subxt = { git = "https://github.com/paritytech/subxt",  tag = "v0.29.0", features = ["substrate-compat"] }
 
 # ibc
-ibc = { path = "../../ibc/modules", features = [] }
-ibc-proto = { path = "../../ibc/proto" }
+ibc = { version = "0.47.0", default-features = false, features = ["borsh", "serde"] }
+ibc-proto = { version = "0.37.1", default-features = false }
+# ibc = { path = "../../ibc/modules", features = [] }
+# ibc-proto = { path = "../../ibc/proto" }
 pallet-ibc = { path = "../../contracts/pallet-ibc" }
 ibc-rpc = { path = "../../contracts/pallet-ibc/rpc" }
 ics08-wasm = { path = "../../light-clients/ics08-wasm" }
+solana-ibc = { path = "../../../emulated-light-client/solana/solana-ibc/programs/solana-ibc" }
 
 [features]
 testing = []
