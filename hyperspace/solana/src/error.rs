@@ -1,4 +1,4 @@
-use ibc::timestamp::ParseTimestampError;
+use ibc::core::timestamp::ParseTimestampError;
 use prost::DecodeError;
 
 /// Error definitions for the cosmos client in accordance with the parachain's Error type.
@@ -18,10 +18,10 @@ pub enum Error {
 	EncodeError(#[from] prost::EncodeError),
 	/// Parse timestamp error
 	#[error("Parse timestamp error: {0}")]
-	ParseTimestampError(#[from] ParseTimestampError),
+	ParseTimestampError(ParseTimestampError),
 	/// Transfer error
 	#[error("IBC transfer error: {0}")]
-	TransferError(#[from] ibc::applications::transfer::error::Error),
+	TransferError(ibc::applications::transfer::error::TokenTransferError),
 	/// Tendermint error
 	#[error("Tendermint error: {0}")]
 	TendermintError(#[from] tendermint::Error),

@@ -2,12 +2,9 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
+use solana_trie::trie;
 use core::{pin::Pin, str::FromStr, time::Duration};
-use ibc_new::core::ics04_channel::msgs::PacketMsg;
-use ibc_storage::{IbcPackets, PrivateStorage, SequenceTripleIdx};
-use ids::{ClientIdx, ConnectionIdx};
-use prost::Message;
-use trie_key::{SequencePath, TrieKey};
+use ibc::core::{ics04_channel::packet::Sequence, ics24_host::path::{CommitmentPath, AckPath, ChannelEndPath}};
 
 use anchor_client::{
 	solana_client::{
@@ -24,29 +21,26 @@ use anchor_lang::{prelude::*, system_program};
 use error::Error;
 use ibc::{
 	core::{
-		ics02_client::{client_state::ClientType, events::UpdateClient},
+		ics02_client::{client_type::ClientType, events::UpdateClient},
 		ics23_commitment::commitment::CommitmentPrefix,
-		ics24_host::{
-			identifier::{ChannelId, ClientId, ConnectionId, PortId},
-			path::{AcksPath, ChannelEndsPath, CommitmentsPath},
-		},
+		ics24_host::identifier::{ChannelId, ClientId, ConnectionId, PortId},
+		events::IbcEvent,
+		timestamp::Timestamp
 	},
-	events::IbcEvent,
-	timestamp::Timestamp,
 	Height,
 };
 use ibc_proto::{
 	google::protobuf::Any,
 	ibc::core::{
 		channel::v1::{
-			Channel, Counterparty as ChanCounterparty, QueryChannelResponse,
+			QueryChannelResponse,
 			QueryNextSequenceReceiveResponse, QueryPacketAcknowledgementResponse,
 			QueryPacketCommitmentResponse, QueryPacketReceiptResponse,
 		},
 		client::v1::{QueryClientStateResponse, QueryConsensusStateResponse},
-		connection::v1::{
-			ConnectionEnd, Counterparty as ConnCounterparty, QueryConnectionResponse, Version,
-		},
+		connection::v1::
+			QueryConnectionResponse
+		,
 	},
 };
 use instructions::AnyCheck;
@@ -63,15 +57,16 @@ use std::{
 use tendermint_rpc::Url;
 use tokio_stream::Stream;
 
-use crate::ibc_storage::{AnyConsensusState, Serialised};
+// use crate::ibc_storage::{AnyConsensusState, Serialised};
+use solana_ibc::{storage::{PrivateStorage, ids::{ClientIdx, ConnectionIdx}, trie_key::{TrieKey, SequencePath}, IbcPackets, SequenceTripleIdx}, client_state::AnyClientState, consensus_state::AnyConsensusState};
 
 mod accounts;
 mod error;
-mod ibc_storage;
-mod ids;
+// mod ibc_storage;
+// mod ids;
 mod instructions;
-mod trie;
-mod trie_key;
+// mod trie;
+// mod trie_key;
 
 const SOLANA_IBC_STORAGE_SEED: &[u8] = b"private";
 const TRIE_SEED: &[u8] = b"trie";
@@ -264,7 +259,8 @@ impl IbcProvider for Client {
 	) -> Result<QueryConsensusStateResponse, Self::Error> {
 		let trie = self.get_trie().await;
 		let storage = self.get_ibc_storage();
-		let Height { revision_height, revision_number } = consensus_height;
+		let revision_height = consensus_height.revision_height();
+		let revision_number = consensus_height.revision_number();
 		let consensus_state_trie_key = TrieKey::for_consensus_state(
 			ClientIdx::from_str(client_id.as_str()).unwrap(),
 			consensus_height,
@@ -279,11 +275,18 @@ impl IbcProvider for Client {
 			.ok_or("Client not found with the given client id".to_owned())?;
 		let serialized_consensus_state = client_store
 			.consensus_states
-			.get(&ibc_new::Height::new(revision_number, revision_height).unwrap())
+			.get(&ibc::Height::new(revision_number, revision_height).unwrap())
 			.ok_or(Error::Custom("No value at given key".to_owned()))?;
-		let consensus_state = Any::decode(&*borsh::to_vec(serialized_consensus_state).unwrap())?;
+		let consensus_state = serialized_consensus_state.get().map_err(|_| {
+			Error::Custom(
+				"Could not
+deserialize consensus state"
+					.to_owned(),
+			)
+		}).unwrap();
+		let any_consensus_state = Any::from(consensus_state);
 		Ok(QueryConsensusStateResponse {
-			consensus_state: Some(consensus_state),
+			consensus_state: Some(any_consensus_state),
 			proof: borsh::to_vec(&consensus_state_proof).unwrap(),
 			proof_height: increment_proof_height(Some(at.into())),
 		})
@@ -308,9 +311,16 @@ impl IbcProvider for Client {
 			.find(|&client| client.client_id.as_str() == client_id.as_str())
 			.ok_or("Client not found with the given client id".to_owned())?;
 		let serialized_client_state = &client_store.client_state;
-		let client_state = Any::decode(&*borsh::to_vec(serialized_client_state).unwrap())?;
+		let client_state = serialized_client_state.get().map_err(|_| {
+			Error::Custom(
+				"Could not
+deserialize client state"
+					.to_owned(),
+			)
+		}).unwrap();
+		let any_client_state = Any::from(client_state);
 		Ok(QueryClientStateResponse {
-			client_state: Some(client_state),
+			client_state: Some(any_client_state),
 			proof: borsh::to_vec(&client_state_proof).unwrap(),
 			proof_height: increment_proof_height(Some(at.into())),
 		})
@@ -334,7 +344,7 @@ impl IbcProvider for Client {
 		client id"
 					.to_owned(),
 			)?;
-		let inner_connection_end = Serialised::get(serialized_connection_end)
+		let connection_end = serialized_connection_end.get()
 			.map_err(|_| {
 				Error::Custom(
 					"Could not
@@ -343,31 +353,8 @@ impl IbcProvider for Client {
 				)
 			})
 			.unwrap();
-		let inner_counterparty = inner_connection_end.counterparty();
-		let connection_end = ConnectionEnd {
-			client_id: inner_connection_end.client_id().to_string(),
-			versions: inner_connection_end
-				.versions()
-				.to_vec()
-				.iter()
-				.map(|version| {
-					let raw_version =
-						ibc_proto_new::ibc::core::connection::v1::Version::from(version.clone());
-					Version { identifier: raw_version.identifier, features: raw_version.features }
-				})
-				.collect(),
-			state: inner_connection_end.state.into(),
-			counterparty: Some(ConnCounterparty {
-				client_id: inner_counterparty.client_id().to_string(),
-				connection_id: inner_counterparty.connection_id.as_ref().unwrap().to_string(),
-				prefix: Some(ibc_proto::ibc::core::commitment::v1::MerklePrefix {
-					key_prefix: inner_counterparty.prefix().clone().into_vec(),
-				}),
-			}),
-			delay_period: inner_connection_end.delay_period().as_secs(),
-		};
 		Ok(QueryConnectionResponse {
-			connection: Some(connection_end),
+			connection: Some(connection_end.into()),
 			proof: borsh::to_vec(&connection_end_proof).unwrap(),
 			proof_height: increment_proof_height(Some(at.into())),
 		})
@@ -381,7 +368,7 @@ impl IbcProvider for Client {
 	) -> Result<QueryChannelResponse, Self::Error> {
 		let trie = self.get_trie().await;
 		let storage = self.get_ibc_storage();
-		let channel_end_path = ChannelEndsPath(port_id.clone(), channel_id.clone());
+		let channel_end_path = ChannelEndPath(port_id.clone(), channel_id.clone());
 		let channel_end_trie_key = TrieKey::from(&channel_end_path);
 		let (_, channel_end_proof) = trie
 			.prove(&channel_end_trie_key)
@@ -390,37 +377,10 @@ impl IbcProvider for Client {
 			.channel_ends
 			.get(&(port_id.to_string(), channel_id.to_string()))
 			.ok_or(Error::Custom("No value at given key".to_owned()))?;
-		let inner_channel_end = Serialised::get(serialized_channel_end)
+		let channel_end = serialized_channel_end.get()
 			.map_err(|_| Error::Custom("Could not deserialize connection end".to_owned()))?;
-		let inner_counterparty = inner_channel_end.counterparty();
-		let state = match inner_channel_end.state {
-			ibc_new::core::ics04_channel::channel::State::Uninitialized => 0,
-			ibc_new::core::ics04_channel::channel::State::Init => 1,
-			ibc_new::core::ics04_channel::channel::State::TryOpen => 2,
-			ibc_new::core::ics04_channel::channel::State::Open => 3,
-			ibc_new::core::ics04_channel::channel::State::Closed => 4,
-		};
-		let ordering = match inner_channel_end.ordering {
-			ibc_new::core::ics04_channel::channel::Order::None => 0,
-			ibc_new::core::ics04_channel::channel::Order::Unordered => 1,
-			ibc_new::core::ics04_channel::channel::Order::Ordered => 2,
-		};
-		let channel_end = Channel {
-			state,
-			ordering,
-			counterparty: Some(ChanCounterparty {
-				port_id: inner_counterparty.port_id.to_string(),
-				channel_id: inner_counterparty.channel_id.clone().unwrap().to_string(),
-			}),
-			connection_hops: inner_channel_end
-				.connection_hops
-				.iter()
-				.map(|connection_id| connection_id.to_string())
-				.collect(),
-			version: inner_channel_end.version.to_string(),
-		};
 		Ok(QueryChannelResponse {
-			channel: Some(channel_end),
+			channel: Some(channel_end.into()),
 			proof: borsh::to_vec(&channel_end_proof).unwrap(),
 			proof_height: increment_proof_height(Some(at.into())),
 		})
@@ -442,10 +402,10 @@ impl IbcProvider for Client {
 		seq: u64,
 	) -> Result<QueryPacketCommitmentResponse, Self::Error> {
 		let trie = self.get_trie().await;
-		let packet_commitment_path = CommitmentsPath {
+		let packet_commitment_path = CommitmentPath {
 			port_id: port_id.clone(),
 			channel_id: channel_id.clone(),
-			sequence: ibc::core::ics04_channel::packet::Sequence(seq),
+			sequence: Sequence::from(seq),
 		};
 		let packet_commitment_trie_key = TrieKey::from(&packet_commitment_path);
 		let (packet_commitment, packet_commitment_proof) = trie
@@ -468,10 +428,10 @@ impl IbcProvider for Client {
 		seq: u64,
 	) -> Result<QueryPacketAcknowledgementResponse, Self::Error> {
 		let trie = self.get_trie().await;
-		let packet_ack_path = AcksPath {
+		let packet_ack_path = AckPath {
 			port_id: port_id.clone(),
 			channel_id: channel_id.clone(),
-			sequence: ibc::core::ics04_channel::packet::Sequence(seq),
+			sequence: Sequence::from(seq),
 		};
 		let packet_ack_trie_key = TrieKey::from(&packet_ack_path);
 		let (packet_ack, packet_ack_proof) = trie
@@ -493,7 +453,7 @@ impl IbcProvider for Client {
 	) -> Result<QueryNextSequenceReceiveResponse, Self::Error> {
 		let trie = self.get_trie().await;
 		let storage = self.get_ibc_storage();
-		let next_sequence_recv_path = SequencePath { port_id, channel_id };
+		let next_sequence_recv_path = SequencePath{ port_id, channel_id};
 		let next_sequence_recv_trie_key = TrieKey::from(next_sequence_recv_path);
 		let (_, next_sequence_recv_proof) = trie
 			.prove(&next_sequence_recv_trie_key)
@@ -548,7 +508,7 @@ impl IbcProvider for Client {
 
 	async fn latest_height_and_timestamp(
 		&self,
-	) -> Result<(Height, ibc::timestamp::Timestamp), Self::Error> {
+	) -> Result<(Height, ibc::core::timestamp::Timestamp), Self::Error> {
 		todo!();
 	}
 
@@ -665,7 +625,7 @@ impl IbcProvider for Client {
 		let sent_packets: Vec<ibc_rpc::PacketInfo> = packets
 			.iter()
 			.filter_map(|packet| match packet {
-				ibc_new::core::ics04_channel::msgs::PacketMsg::Recv(recv_packet) => {
+				ibc::core::ics04_channel::msgs::PacketMsg::Recv(recv_packet) => {
 					let packet = &recv_packet.packet;
 					let does_seq_exist = seqs.binary_search(&u64::from(packet.seq_on_a)).is_ok();
 					if packet.chan_id_on_a.to_string() != channel_id.to_string() ||
@@ -675,12 +635,12 @@ impl IbcProvider for Client {
 						None
 					} else {
 						let timeout_height = match packet.timeout_height_on_b {
-							ibc_new::core::ics04_channel::timeout::TimeoutHeight::Never =>
+							ibc::core::ics04_channel::timeout::TimeoutHeight::Never =>
 								ibc_proto::ibc::core::client::v1::Height {
 									revision_height: 0,
 									revision_number: 0,
 								},
-							ibc_new::core::ics04_channel::timeout::TimeoutHeight::At(height) =>
+							ibc::core::ics04_channel::timeout::TimeoutHeight::At(height) =>
 								ibc_proto::ibc::core::client::v1::Height {
 									revision_height: height.revision_height(),
 									revision_number: height.revision_number(),
@@ -695,14 +655,14 @@ impl IbcProvider for Client {
 							destination_channel: packet.chan_id_on_b.to_string(),
 							channel_order: String::from("IDK"),
 							data: packet.data.clone(),
-							timeout_height,
+							timeout_height: ibc_proto_old::ibc::core::client::v1::Height { revision_number: timeout_height.revision_number, revision_height: timeout_height.revision_height },
 							timeout_timestamp: packet.timeout_timestamp_on_b.nanoseconds(),
 							ack: None,
 						};
 						Some(packet_info)
 					}
 				},
-				ibc_new::core::ics04_channel::msgs::PacketMsg::Ack(ack_packet) => {
+				ibc::core::ics04_channel::msgs::PacketMsg::Ack(ack_packet) => {
 					let packet = &ack_packet.packet;
 					let does_seq_exist = seqs.binary_search(&u64::from(packet.seq_on_a)).is_ok();
 					if packet.chan_id_on_a.to_string() != channel_id.to_string() ||
@@ -712,12 +672,12 @@ impl IbcProvider for Client {
 						None
 					} else {
 						let timeout_height = match packet.timeout_height_on_b {
-							ibc_new::core::ics04_channel::timeout::TimeoutHeight::Never =>
+							ibc::core::ics04_channel::timeout::TimeoutHeight::Never =>
 								ibc_proto::ibc::core::client::v1::Height {
 									revision_height: 0,
 									revision_number: 0,
 								},
-							ibc_new::core::ics04_channel::timeout::TimeoutHeight::At(height) =>
+							ibc::core::ics04_channel::timeout::TimeoutHeight::At(height) =>
 								ibc_proto::ibc::core::client::v1::Height {
 									revision_height: height.revision_height(),
 									revision_number: height.revision_number(),
@@ -732,7 +692,7 @@ impl IbcProvider for Client {
 							destination_channel: packet.chan_id_on_b.to_string(),
 							channel_order: String::from("IDK"),
 							data: packet.data.clone(),
-							timeout_height,
+							timeout_height: ibc_proto_old::ibc::core::client::v1::Height { revision_number: timeout_height.revision_number, revision_height: timeout_height.revision_height },
 							timeout_timestamp: packet.timeout_timestamp_on_b.nanoseconds(),
 							ack: Some(ack_packet.acknowledgement.as_ref().to_vec()),
 						};
@@ -754,7 +714,7 @@ impl IbcProvider for Client {
 		&self,
 		client_id: ClientId,
 		client_height: Height,
-	) -> Result<(Height, ibc::timestamp::Timestamp), Self::Error> {
+	) -> Result<(Height, ibc::core::timestamp::Timestamp), Self::Error> {
 		let storage = self.get_ibc_storage();
 		let client_store = storage
 			.clients
@@ -762,7 +722,7 @@ impl IbcProvider for Client {
 			.find(|&client| client.client_id.as_str() == client_id.as_str())
 			.ok_or("Client not found with the given client id".to_owned())?;
 		let inner_client_height =
-			ibc_new::Height::new(client_height.revision_number, client_height.revision_height)
+			ibc::Height::new(client_height.revision_number(), client_height.revision_height())
 				.unwrap();
 		let height = client_store
 			.processed_heights
@@ -773,17 +733,17 @@ impl IbcProvider for Client {
 			.get(&inner_client_height)
 			.ok_or("No timestamp found with the given height".to_owned())?;
 		Ok((
-			Height {
-				revision_height: height.revision_height(),
-				revision_number: height.revision_number(),
-			},
+			Height::new(
+				height.revision_number(),
+				height.revision_height(),
+			).expect("Invalid Height"),
 			Timestamp::from_nanoseconds(*timestamp).unwrap(),
 		))
 	}
 
 	async fn query_host_consensus_state_proof(
 		&self,
-		client_state: &pallet_ibc::light_clients::AnyClientState,
+		client_state: &AnyClientState,
 	) -> Result<Option<Vec<u8>>, Self::Error> {
 		todo!()
 	}
@@ -835,7 +795,7 @@ impl IbcProvider for Client {
 		self.connection_id = Some(connection_id)
 	}
 
-	fn client_type(&self) -> ibc::core::ics02_client::client_state::ClientType {
+	fn client_type(&self) -> ibc::core::ics02_client::client_type::ClientType {
 		self.client_type.clone()
 	}
 
@@ -895,7 +855,7 @@ impl IbcProvider for Client {
 	async fn initialize_client_state(
 		&self,
 	) -> Result<
-		(pallet_ibc::light_clients::AnyClientState, pallet_ibc::light_clients::AnyConsensusState),
+		(AnyClientState, AnyConsensusState),
 		Self::Error,
 	> {
 		todo!()
@@ -931,10 +891,10 @@ impl IbcProvider for Client {
 }
 
 impl KeyProvider for Client {
-	fn account_id(&self) -> ibc::signer::Signer {
+	fn account_id(&self) -> ibc::Signer {
 		let key_entry = &self.keybase;
 		let public_key = key_entry.public_key;
-		ibc::signer::Signer::from_str(&public_key.to_string()).unwrap()
+		ibc::Signer::from(public_key.to_string())
 	}
 }
 
@@ -1102,11 +1062,13 @@ pub fn test_storage_deserialization() {
 	println!("This is the storage account {:?} {}", solana_ibc_storage_account, ID);
 	let serialized_consensus_state = solana_ibc_storage_account.clients[0]
 		.consensus_states
-		.get(&ibc_new::Height::new(0, 1).unwrap())
+		.get(&ibc::Height::new(0, 1).unwrap())
 		.ok_or(Error::Custom("No value at given key".to_owned()))
 		.unwrap();
 	let serialized_connection_end = &solana_ibc_storage_account.connections[0];
-	let connection_end = ibc_storage::Serialised::get(serialized_connection_end).unwrap();
+	let connection_end = serialized_connection_end.get().unwrap();
 	let in_vec = serialized_consensus_state.try_to_vec().unwrap();
-	println!("This is invec {:?}", in_vec);
+	let consensus_state = serialized_consensus_state.get().unwrap();
+	let any_consensus_state = Any::from(consensus_state.clone());
+	println!("This is invec {:?} {:?}", consensus_state, any_consensus_state);
 }
