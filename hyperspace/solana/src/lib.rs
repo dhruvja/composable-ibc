@@ -2,9 +2,13 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
-use solana_trie::trie;
+use anchor_spl::associated_token::get_associated_token_address;
 use core::{pin::Pin, str::FromStr, time::Duration};
-use ibc::core::{ics04_channel::packet::Sequence, ics24_host::path::{CommitmentPath, AckPath, ChannelEndPath}};
+use ibc::{core::{
+	ics04_channel::packet::Sequence,
+	ics24_host::path::{AckPath, CommitmentPath}, MsgEnvelope, ics02_client::client_state::ClientStateCommon,
+}, applications::transfer::{PrefixedCoin, PrefixedDenom, TracePath, BaseDenom, Amount}};
+use solana_trie::trie;
 
 use anchor_client::{
 	solana_client::{
@@ -21,11 +25,11 @@ use anchor_lang::{prelude::*, system_program};
 use error::Error;
 use ibc::{
 	core::{
+		events::IbcEvent,
 		ics02_client::{client_type::ClientType, events::UpdateClient},
 		ics23_commitment::commitment::CommitmentPrefix,
 		ics24_host::identifier::{ChannelId, ClientId, ConnectionId, PortId},
-		events::IbcEvent,
-		timestamp::Timestamp
+		timestamp::Timestamp,
 	},
 	Height,
 };
@@ -33,17 +37,15 @@ use ibc_proto::{
 	google::protobuf::Any,
 	ibc::core::{
 		channel::v1::{
-			QueryChannelResponse,
-			QueryNextSequenceReceiveResponse, QueryPacketAcknowledgementResponse,
-			QueryPacketCommitmentResponse, QueryPacketReceiptResponse,
+			QueryChannelResponse, QueryNextSequenceReceiveResponse,
+			QueryPacketAcknowledgementResponse, QueryPacketCommitmentResponse,
+			QueryPacketReceiptResponse,
 		},
 		client::v1::{QueryClientStateResponse, QueryConsensusStateResponse},
-		connection::v1::
-			QueryConnectionResponse
-		,
+		connection::v1::QueryConnectionResponse,
 	},
 };
-use instructions::AnyCheck;
+// use instructions::AnyCheck;
 use pallet_ibc::light_clients::AnyClientMessage;
 use primitives::{
 	Chain, CommonClientConfig, CommonClientState, IbcProvider, KeyProvider, LightClientSync,
@@ -58,13 +60,22 @@ use tendermint_rpc::Url;
 use tokio_stream::Stream;
 
 // use crate::ibc_storage::{AnyConsensusState, Serialised};
-use solana_ibc::{storage::{PrivateStorage, ids::{ClientIdx, ConnectionIdx}, trie_key::{TrieKey, SequencePath}, IbcPackets, SequenceTripleIdx}, client_state::AnyClientState, consensus_state::AnyConsensusState};
+use solana_ibc::{
+	accounts, instruction,
+	client_state::AnyClientState,
+	consensus_state::AnyConsensusState,
+	storage::{
+		ids::{ClientIdx, ConnectionIdx, PortChannelPK},
+		trie_key::{SequencePath, TrieKey},
+		IbcPackets, PrivateStorage, SequenceTripleIdx,
+	},
+};
 
-mod accounts;
+// mod accounts;
 mod error;
 // mod ibc_storage;
 // mod ids;
-mod instructions;
+// mod instructions;
 // mod trie;
 // mod trie_key;
 
@@ -277,13 +288,16 @@ impl IbcProvider for Client {
 			.consensus_states
 			.get(&ibc::Height::new(revision_number, revision_height).unwrap())
 			.ok_or(Error::Custom("No value at given key".to_owned()))?;
-		let consensus_state = serialized_consensus_state.get().map_err(|_| {
-			Error::Custom(
-				"Could not
+		let consensus_state = serialized_consensus_state
+			.get()
+			.map_err(|_| {
+				Error::Custom(
+					"Could not
 deserialize consensus state"
-					.to_owned(),
-			)
-		}).unwrap();
+						.to_owned(),
+				)
+			})
+			.unwrap();
 		let any_consensus_state = Any::from(consensus_state);
 		Ok(QueryConsensusStateResponse {
 			consensus_state: Some(any_consensus_state),
@@ -311,13 +325,16 @@ deserialize consensus state"
 			.find(|&client| client.client_id.as_str() == client_id.as_str())
 			.ok_or("Client not found with the given client id".to_owned())?;
 		let serialized_client_state = &client_store.client_state;
-		let client_state = serialized_client_state.get().map_err(|_| {
-			Error::Custom(
-				"Could not
+		let client_state = serialized_client_state
+			.get()
+			.map_err(|_| {
+				Error::Custom(
+					"Could not
 deserialize client state"
-					.to_owned(),
-			)
-		}).unwrap();
+						.to_owned(),
+				)
+			})
+			.unwrap();
 		let any_client_state = Any::from(client_state);
 		Ok(QueryClientStateResponse {
 			client_state: Some(any_client_state),
@@ -344,7 +361,8 @@ deserialize client state"
 		client id"
 					.to_owned(),
 			)?;
-		let connection_end = serialized_connection_end.get()
+		let connection_end = serialized_connection_end
+			.get()
 			.map_err(|_| {
 				Error::Custom(
 					"Could not
@@ -368,16 +386,17 @@ deserialize client state"
 	) -> Result<QueryChannelResponse, Self::Error> {
 		let trie = self.get_trie().await;
 		let storage = self.get_ibc_storage();
-		let channel_end_path = ChannelEndPath(port_id.clone(), channel_id.clone());
-		let channel_end_trie_key = TrieKey::from(&channel_end_path);
+		let channel_end_path = PortChannelPK::try_from(port_id, channel_id).unwrap();
+		let channel_end_trie_key = TrieKey::for_channel_end(&channel_end_path);
 		let (_, channel_end_proof) = trie
 			.prove(&channel_end_trie_key)
 			.map_err(|_| Error::Custom("value is sealed and cannot be fetched".to_owned()))?;
 		let serialized_channel_end = storage
 			.channel_ends
-			.get(&(port_id.to_string(), channel_id.to_string()))
+			.get(&channel_end_path)
 			.ok_or(Error::Custom("No value at given key".to_owned()))?;
-		let channel_end = serialized_channel_end.get()
+		let channel_end = serialized_channel_end
+			.get()
 			.map_err(|_| Error::Custom("Could not deserialize connection end".to_owned()))?;
 		Ok(QueryChannelResponse {
 			channel: Some(channel_end.into()),
@@ -407,7 +426,7 @@ deserialize client state"
 			channel_id: channel_id.clone(),
 			sequence: Sequence::from(seq),
 		};
-		let packet_commitment_trie_key = TrieKey::from(&packet_commitment_path);
+		let packet_commitment_trie_key = TrieKey::try_from(&packet_commitment_path).unwrap();
 		let (packet_commitment, packet_commitment_proof) = trie
 			.prove(&packet_commitment_trie_key)
 			.map_err(|_| Error::Custom("value is sealed and cannot be fetched".to_owned()))?;
@@ -433,7 +452,7 @@ deserialize client state"
 			channel_id: channel_id.clone(),
 			sequence: Sequence::from(seq),
 		};
-		let packet_ack_trie_key = TrieKey::from(&packet_ack_path);
+		let packet_ack_trie_key = TrieKey::try_from(&packet_ack_path).unwrap();
 		let (packet_ack, packet_ack_proof) = trie
 			.prove(&packet_ack_trie_key)
 			.map_err(|_| Error::Custom("value is sealed and cannot be fetched".to_owned()))?;
@@ -453,14 +472,14 @@ deserialize client state"
 	) -> Result<QueryNextSequenceReceiveResponse, Self::Error> {
 		let trie = self.get_trie().await;
 		let storage = self.get_ibc_storage();
-		let next_sequence_recv_path = SequencePath{ port_id, channel_id};
-		let next_sequence_recv_trie_key = TrieKey::from(next_sequence_recv_path);
+		let next_sequence_recv_path = SequencePath { port_id, channel_id };
+		let next_sequence_recv_trie_key = TrieKey::try_from(next_sequence_recv_path).unwrap();
 		let (_, next_sequence_recv_proof) = trie
 			.prove(&next_sequence_recv_trie_key)
 			.map_err(|_| Error::Custom("value is sealed and cannot be fetched".to_owned()))?;
 		let next_seq = storage
 			.next_sequence
-			.get(&(port_id.to_string(), channel_id.to_string()))
+			.get(&PortChannelPK::try_from(port_id, channel_id).unwrap())
 			.ok_or(Error::Custom("No value at given key".to_owned()))?;
 		let next_seq_recv = next_seq
 			.get(SequenceTripleIdx::Recv)
@@ -627,7 +646,7 @@ deserialize client state"
 			.filter_map(|packet| match packet {
 				ibc::core::ics04_channel::msgs::PacketMsg::Recv(recv_packet) => {
 					let packet = &recv_packet.packet;
-					let does_seq_exist = seqs.binary_search(&u64::from(packet.seq_on_a)).is_ok();
+					let does_seq_exist = seqs.iter().find(|&&seq| seq == u64::from(packet.seq_on_a)).is_some();
 					if packet.chan_id_on_a.to_string() != channel_id.to_string() ||
 						packet.port_id_on_a.to_string() != port_id.to_string() ||
 						!does_seq_exist
@@ -655,7 +674,10 @@ deserialize client state"
 							destination_channel: packet.chan_id_on_b.to_string(),
 							channel_order: String::from("IDK"),
 							data: packet.data.clone(),
-							timeout_height: ibc_proto_old::ibc::core::client::v1::Height { revision_number: timeout_height.revision_number, revision_height: timeout_height.revision_height },
+							timeout_height: ibc_proto_old::ibc::core::client::v1::Height {
+								revision_number: timeout_height.revision_number,
+								revision_height: timeout_height.revision_height,
+							},
 							timeout_timestamp: packet.timeout_timestamp_on_b.nanoseconds(),
 							ack: None,
 						};
@@ -664,7 +686,7 @@ deserialize client state"
 				},
 				ibc::core::ics04_channel::msgs::PacketMsg::Ack(ack_packet) => {
 					let packet = &ack_packet.packet;
-					let does_seq_exist = seqs.binary_search(&u64::from(packet.seq_on_a)).is_ok();
+					let does_seq_exist = seqs.iter().find(|&&seq| seq == u64::from(packet.seq_on_a)).is_some();
 					if packet.chan_id_on_a.to_string() != channel_id.to_string() ||
 						packet.port_id_on_a.to_string() != port_id.to_string() ||
 						!does_seq_exist
@@ -692,7 +714,10 @@ deserialize client state"
 							destination_channel: packet.chan_id_on_b.to_string(),
 							channel_order: String::from("IDK"),
 							data: packet.data.clone(),
-							timeout_height: ibc_proto_old::ibc::core::client::v1::Height { revision_number: timeout_height.revision_number, revision_height: timeout_height.revision_height },
+							timeout_height: ibc_proto_old::ibc::core::client::v1::Height {
+								revision_number: timeout_height.revision_number,
+								revision_height: timeout_height.revision_height,
+							},
 							timeout_timestamp: packet.timeout_timestamp_on_b.nanoseconds(),
 							ack: Some(ack_packet.acknowledgement.as_ref().to_vec()),
 						};
@@ -733,10 +758,8 @@ deserialize client state"
 			.get(&inner_client_height)
 			.ok_or("No timestamp found with the given height".to_owned())?;
 		Ok((
-			Height::new(
-				height.revision_number(),
-				height.revision_height(),
-			).expect("Invalid Height"),
+			Height::new(height.revision_number(), height.revision_height())
+				.expect("Invalid Height"),
 			Timestamp::from_nanoseconds(*timestamp).unwrap(),
 		))
 	}
@@ -745,14 +768,34 @@ deserialize client state"
 		&self,
 		client_state: &AnyClientState,
 	) -> Result<Option<Vec<u8>>, Self::Error> {
-		todo!()
+		let trie = self.get_trie().await;
+		let height = client_state.latest_height();
+		let client_id = self.client_id();
+		let client_type = self.client_type();
+		let client_idx = client_id.as_str().strip_prefix(format!("{}-", client_type.as_str()).as_str()).and_then(|id| id.parse().ok()).unwrap();
+		let consensus_state_trie_key = TrieKey::for_consensus_state(client_idx, height);
+		let (_, host_consensus_state_proof) = trie.prove(&consensus_state_trie_key).map_err(|_| Error::Custom("value is sealed and cannot be fetched".to_owned()))?;
+		Ok(Some(borsh::to_vec(&host_consensus_state_proof).unwrap()))
 	}
 
 	async fn query_ibc_balance(
 		&self,
 		asset_id: Self::AssetId,
 	) -> Result<Vec<ibc::applications::transfer::PrefixedCoin>, Self::Error> {
-		todo!()
+		let denom = &asset_id;
+		let (token_mint_key, _bump) =
+        Pubkey::find_program_address(&[denom.as_ref()], &solana_ibc::ID);
+		let user_token_address =
+        get_associated_token_address(&self.keybase.public_key, &token_mint_key);
+		let sol_rpc_client = self.rpc_client();
+		let balance = sol_rpc_client.get_token_account_balance(&user_token_address).await.unwrap();
+		Ok(vec![PrefixedCoin {
+			denom: PrefixedDenom {
+				trace_path: TracePath::default(),
+				base_denom: BaseDenom::from_str(denom).unwrap(),
+			},
+			amount: Amount::from_str(&balance.ui_amount_string).unwrap(),
+		}])
 	}
 
 	fn connection_prefix(&self) -> ibc::core::ics23_commitment::commitment::CommitmentPrefix {
@@ -826,8 +869,8 @@ deserialize client state"
 		let channels: Vec<(ChannelId, PortId)> = BTreeMap::keys(&storage.channel_ends)
 			.map(|channel_end| {
 				(
-					ChannelId::from_str(&channel_end.1).unwrap(),
-					PortId::from_str(&channel_end.0).unwrap(),
+					channel_end.channel_id(),
+					channel_end.port_id(),
 				)
 			})
 			.collect();
@@ -854,10 +897,7 @@ deserialize client state"
 
 	async fn initialize_client_state(
 		&self,
-	) -> Result<
-		(AnyClientState, AnyConsensusState),
-		Self::Error,
-	> {
+	) -> Result<(AnyClientState, AnyConsensusState), Self::Error> {
 		todo!()
 	}
 
@@ -957,22 +997,22 @@ impl Chain for Client {
 		let packet_storage_key = self.get_packet_storage_key();
 		let chain_key = self.get_chain_key();
 
-		let all_messages = messages
-			.into_iter()
-			.map(|message| AnyCheck { type_url: message.type_url, value: message.value })
-			.collect();
+		let all_messages = MsgEnvelope::try_from(messages[0].clone()).unwrap();
+			// .into_iter()
+			// .map(|message| AnyCheck { type_url: message.type_url, value: message.value })
+			// .collect();
 
 		let sig: Signature = program
 			.request()
-			.accounts(accounts::LocalDeliver::new(
-				authority.pubkey(),
-				solana_ibc_storage_key,
-				trie_key,
-				packet_storage_key,
-				chain_key,
-				system_program::ID,
-			))
-			.args(instructions::Deliver { messages: all_messages })
+			.accounts(accounts::Deliver {
+				sender: authority.pubkey(),
+				storage: solana_ibc_storage_key,
+				trie: trie_key,
+				packets: packet_storage_key,
+				chain: chain_key,
+				system_program: system_program::ID,
+			})
+			.args(instruction::Deliver { message: all_messages })
 			.payer(authority.clone())
 			.signer(&*authority)
 			.send_with_spinner_and_config(RpcSendTransactionConfig {
