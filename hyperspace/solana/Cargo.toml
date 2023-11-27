@@ -38,6 +38,8 @@ rand = "0.8.5"
 anchor-client = "0.29.0"
 anchor-lang = "0.29.0"
 anchor-spl = "0.29.0"
+solana-transaction-status = "1.16.18"
+base64 = "0.21.4"
 borsh = { version = "0.10.3", default-features = false }
 
 # composable
@@ -54,13 +56,15 @@ pallet-ibc = { path = "../../contracts/pallet-ibc" }
 
 # Trie
 lib = { git = "https://github.com/ComposableFi/emulated-light-client.git" }
+# lib = { path = "../../../emulated-light-client/common/lib" }
 memory = { git = "https://github.com/ComposableFi/emulated-light-client.git" }
 sealable-trie = { git = "https://github.com/ComposableFi/emulated-light-client.git", features = ["borsh"] }
 stdx = { git = "https://github.com/ComposableFi/emulated-light-client.git" }
 solana-trie = { git = "https://github.com/ComposableFi/emulated-light-client.git" }
 
 #Contract
-solana-ibc = { git = "https://github.com/ComposableFi/emulated-light-client.git", features = ["mocks"]}
+solana-ibc = { git = "https://github.com/ComposableFi/emulated-light-client.git", branch="mpn/d", features = ["mocks"]}
+# solana-ibc = { path = "../../../emulated-light-client/solana/solana-ibc/programs/solana-ibc", features = ["mocks"]}
 
 tracing = "0.1.36"
 
