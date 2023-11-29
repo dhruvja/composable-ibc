@@ -19,8 +19,9 @@ use solana_trie::trie;
 
 use anchor_client::{
 	solana_client::{
-		nonblocking::rpc_client::RpcClient as AsyncRpcClient, rpc_client::RpcClient,
-		rpc_config::RpcSendTransactionConfig, rpc_response::RpcLogsResponse,
+		nonblocking::{rpc_client::RpcClient as AsyncRpcClient},
+		rpc_client::RpcClient,
+		rpc_config::{RpcSendTransactionConfig, RpcTransactionLogsFilter, RpcTransactionLogsConfig}, pubsub_client::PubsubClient,
 	},
 	solana_sdk::{
 		commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -50,7 +51,7 @@ use ibc_proto::{
 			QueryPacketReceiptResponse,
 		},
 		client::v1::{QueryClientStateResponse, QueryConsensusStateResponse},
-		connection::v1::{QueryConnectionResponse, IdentifiedConnection, Version},
+		connection::v1::{IdentifiedConnection, QueryConnectionResponse, Version},
 	},
 };
 use pallet_ibc::light_clients::AnyClientMessage;
@@ -886,15 +887,30 @@ deserialize client state"
 		let storage = self.get_ibc_storage();
 		let client_id_key = ClientId::from_str(&client_id).unwrap();
 		let mut index = -1;
-		let connections: Vec<IdentifiedConnection> = storage.connections.iter().filter_map(|serialized_connection| {
-			index += 1;
-			let connection = serialized_connection.get().unwrap(); 
-			if connection.client_id_matches(&client_id_key) {
-				let versions: Vec<Version> = connection.versions().iter().map(|version| version.clone().into()).collect();
-				Some(IdentifiedConnection { id: format!("{}-{}", ConnectionId::prefix(), index), client_id: client_id.clone(), versions, state: i32::from(connection.state().clone()), counterparty: Some(connection.counterparty().clone().into()), delay_period: connection.delay_period().as_secs() });
-			}
-			None
-		}).collect();
+		let connections: Vec<IdentifiedConnection> = storage
+			.connections
+			.iter()
+			.filter_map(|serialized_connection| {
+				index += 1;
+				let connection = serialized_connection.get().unwrap();
+				if connection.client_id_matches(&client_id_key) {
+					let versions: Vec<Version> = connection
+						.versions()
+						.iter()
+						.map(|version| version.clone().into())
+						.collect();
+					Some(IdentifiedConnection {
+						id: format!("{}-{}", ConnectionId::prefix(), index),
+						client_id: client_id.clone(),
+						versions,
+						state: i32::from(connection.state().clone()),
+						counterparty: Some(connection.counterparty().clone().into()),
+						delay_period: connection.delay_period().as_secs(),
+					});
+				}
+				None
+			})
+			.collect();
 		Ok(connections)
 	}
 
@@ -1207,48 +1223,45 @@ fn get_events_from_logs(logs: Vec<String>) -> Vec<IbcEvent> {
 pub fn test_storage_deserialization() {
 	println!("How is this test, do you like it?");
 	let authority = Rc::new(Keypair::new());
+	let cluster = Cluster::Devnet;
 	let client = AnchorClient::new_with_options(
-		Cluster::Localnet,
+		cluster.clone(),
 		authority.clone(),
 		CommitmentConfig::processed(),
 	);
-	let program = client.program(ID).unwrap();
+	// let program = client.program(ID).unwrap();
 
-	let storage = Pubkey::find_program_address(&[SOLANA_IBC_STORAGE_SEED], &ID).0;
-	// println!("THis is the sotrage key {} {}", storage, ID);
-	let solana_ibc_storage_account: PrivateStorage = program.account(storage).unwrap();
-	// println!("This is the storage account {:?} {}", solana_ibc_storage_account, ID);
-	let serialized_consensus_state = solana_ibc_storage_account.clients[0]
-		.consensus_states
-		.get(&ibc::Height::new(0, 1).unwrap())
-		.ok_or(Error::Custom("No value at given key".to_owned()))
-		.unwrap();
-	let serialized_connection_end = &solana_ibc_storage_account.connections[0];
-	let connection_end = serialized_connection_end.get().unwrap();
-	let in_vec = serialized_consensus_state.try_to_vec().unwrap();
-	let consensus_state = serialized_consensus_state.get().unwrap();
-	let any_consensus_state = Any::from(consensus_state.clone());
-	// println!("This is invec {:?} {:?}", consensus_state, any_consensus_state);
+	// let storage = Pubkey::find_program_address(&[SOLANA_IBC_STORAGE_SEED], &ID).0;
 
-	let tx_id = String::from(
-		"5wYZXqRaH9ZohMuotuscpg5Xh1mkPTrrtpQB5wKq7DJC1BRPjHobU6jNuoAHNBLPX1EzZjwJNkvjtXs9Qqgjc1zi",
-	);
-	let signature = Signature::from_str(&tx_id).unwrap();
-	let sol_rpc_client: RpcClient = program.rpc();
-	let tx = sol_rpc_client.get_transaction(&signature, UiTransactionEncoding::Json).unwrap();
-	let logs = match tx.transaction.meta.unwrap().log_messages {
-		solana_transaction_status::option_serializer::OptionSerializer::Some(logs) => logs,
-		solana_transaction_status::option_serializer::OptionSerializer::None => panic!(),
-		solana_transaction_status::option_serializer::OptionSerializer::Skip => panic!(),
-	};
-	let events = get_events_from_logs(logs);
-	let result: Vec<&CreateClient> = events
-		.iter()
-		.filter_map(|event| match event {
-			IbcEvent::CreateClient(e) => Some(e),
-			_ => None,
-		})
-		.collect();
-	let client_id = result[0].client_id();
-	println!("THis is the client id {}", client_id);
+	let (logs_listener, receiver) = PubsubClient::logs_subscribe(
+		cluster.ws_url(),
+		RpcTransactionLogsFilter::Mentions(vec![system_program::ID.to_string()]),
+		RpcTransactionLogsConfig {
+			commitment: Some(CommitmentConfig::processed()),
+		},
+	).unwrap();
+
+	loop {
+		match receiver.recv() {
+				Ok(logs) => {
+						println!("Transaction executed in slot {}:", logs.context.slot);
+						println!("  Signature: {}", logs.value.signature);
+						println!(
+								"  Status: {}",
+								logs.value
+										.err
+										.map(|err| err.to_string())
+										.unwrap_or_else(|| "Ok".to_string())
+						);
+						println!("  Log Messages:");
+						for log in logs.value.logs {
+								println!("    {log}");
+						}
+				}
+				Err(err) => {
+						panic!("{}", format!("Disconnected: {err}"));
+				}
+		}
+}
+
 }
