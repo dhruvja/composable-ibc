@@ -29,7 +29,8 @@ ibc-proto = { version = "0.37.1", default-features = false }
 pallet-ibc = { path = "../../contracts/pallet-ibc" }
 ibc-rpc = { path = "../../contracts/pallet-ibc/rpc" }
 ics08-wasm = { path = "../../light-clients/ics08-wasm" }
-solana-ibc = { path = "../../../emulated-light-client/solana/solana-ibc/programs/solana-ibc" }
+solana-ibc = { git = "https://github.com/ComposableFi/emulated-light-client.git", branch = "mpn/d", features = ["mocks"]}
+# solana-ibc = { path = "../../../emulated-light-client/solana/solana-ibc/programs/solana-ibc", features = ["mocks"]}
 
 [features]
 testing = []

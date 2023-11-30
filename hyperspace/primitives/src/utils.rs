@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::Chain;
 #[cfg(any(test, feature = "testing"))]
 use crate::TestProvider;
-use crate::Chain;
 use futures::{future, StreamExt};
-use ibc::{core::{
+use ibc::core::{
+		events::IbcEvent,
 		ics02_client::msgs::create_client::MsgCreateClient,
 		ics03_connection::{connection::Counterparty, msgs::conn_open_init::MsgConnectionOpenInit},
-		ics04_channel::{self, msgs::MsgChannelOpenInit},
-		ics04_channel::channel::Order,
-		ics24_host::identifier::{ChannelId, ClientId, ConnectionId, PortId}, events::IbcEvent, Msg,
-	}, Signer};
+		ics04_channel::{self, channel::Order, msgs::MsgChannelOpenInit},
+		ics24_host::identifier::{ChannelId, ClientId, ConnectionId, PortId},
+		Msg,
+	};
 use ibc_proto::{google::protobuf::Any, protobuf::Protobuf};
 use std::{future::Future, time::Duration};
 
@@ -129,9 +130,7 @@ pub async fn create_connection(
 	let (connection_id_b, connection_id_a) = match events.pop() {
 		Some(IbcEvent::OpenConfirmConnection(conn)) => (
 			conn.conn_id_on_b().clone(),
-			conn.conn_id_on_a()
-				.expect("Failed to create connection")
-				.clone(),
+			conn.conn_id_on_a().expect("Failed to create connection").clone(),
 		),
 		got => panic!("Last event should be OpenConfirmConnection: {got:?}"),
 	};
@@ -146,11 +145,8 @@ pub async fn create_channel(
 	chain_b: &mut impl Chain,
 	connection_id: ConnectionId,
 	port_id_on_a: PortId,
-	// ChannelOpenInit requires Port id of chain b ( dont know why though )
-	port_id_on_b: PortId,
 	version: String,
 	order: Order,
-	signer: Signer,
 ) -> Result<(ChannelId, ChannelId), anyhow::Error> {
 	// let channel = ChannelEnd::new(
 	// 	State::Init,
@@ -160,7 +156,14 @@ pub async fn create_channel(
 	// 	ics04_channel::Version::new(version.clone()),
 	// );
 
-	let msg = MsgChannelOpenInit { port_id_on_a, connection_hops_on_a: vec![connection_id], port_id_on_b, ordering: order, signer, version_proposal: ics04_channel::Version::new(version) };
+	let msg = MsgChannelOpenInit {
+		port_id_on_a: port_id_on_a.clone(),
+		connection_hops_on_a: vec![connection_id],
+		port_id_on_b: port_id_on_a.clone(),
+		ordering: order,
+		signer: chain_a.account_id(),
+		version_proposal: ics04_channel::Version::new(version),
+	};
 
 	let msg = Any { type_url: msg.type_url(), value: msg.encode_vec() };
 

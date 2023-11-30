@@ -46,7 +46,10 @@ use ibc::{
 	applications::transfer::PrefixedCoin,
 	core::{
 		events::IbcEvent,
-		ics02_client::{client_type::ClientType, events::UpdateClient, consensus_state::ConsensusState, client_state::ClientStateCommon},
+		ics02_client::{
+			client_state::ClientStateCommon, client_type::ClientType,
+			consensus_state::ConsensusState, events::UpdateClient,
+		},
 		ics04_channel::{
 			channel::{ChannelEnd, Order},
 			packet::Packet,
@@ -913,7 +916,7 @@ pub fn filter_events_by_ids(
 		pub chan_id_on_b: &'a ChannelId,
 	}
 	pub struct ConnectionAttributes<'a> {
-		pub connection_id:  Option<&'a ConnectionId>,
+		pub connection_id: Option<&'a ConnectionId>,
 		pub counterparty_connection_id: Option<&'a ConnectionId>,
 	}
 	pub struct ChannelAttributes<'a> {
@@ -1031,7 +1034,7 @@ pub fn filter_events_by_ids(
 			channel_id: e.chan_id_on_a(),
 			counterparty_channel_id: Some(e.chan_id_on_b()),
 		}),
-		IbcEvent::Module(_) => true, 
+		IbcEvent::Module(_) => true,
 		IbcEvent::Message(_) => true,
 	};
 	if !v {
@@ -1045,10 +1048,8 @@ fn calculate_block_delay(
 	max_expected_time_per_block: &Duration,
 ) -> u64 {
 	if max_expected_time_per_block.is_zero() {
-			return 0;
+		return 0
 	}
-	let delay = delay_period_time.as_secs_f64() /
-			max_expected_time_per_block.as_secs_f64();
+	let delay = delay_period_time.as_secs_f64() / max_expected_time_per_block.as_secs_f64();
 	delay.ceil() as u64
 }
-
