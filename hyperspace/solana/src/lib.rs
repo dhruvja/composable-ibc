@@ -16,12 +16,16 @@ use ibc::{
 	},
 };
 use solana_trie::trie;
+use tokio::sync::{broadcast, mpsc::unbounded_channel};
 
 use anchor_client::{
 	solana_client::{
-		nonblocking::{rpc_client::RpcClient as AsyncRpcClient},
+		nonblocking::rpc_client::RpcClient as AsyncRpcClient,
+		pubsub_client::PubsubClient,
 		rpc_client::RpcClient,
-		rpc_config::{RpcSendTransactionConfig, RpcTransactionLogsFilter, RpcTransactionLogsConfig}, pubsub_client::PubsubClient,
+		rpc_config::{
+			RpcSendTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
+		},
 	},
 	solana_sdk::{
 		commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -67,7 +71,7 @@ use std::{
 	sync::{Arc, Mutex},
 };
 use tendermint_rpc::Url;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, wrappers::BroadcastStream, StreamExt};
 
 // use crate::ibc_storage::{AnyConsensusState, Serialised};
 use solana_ibc::{
@@ -269,7 +273,31 @@ impl IbcProvider for Client {
 	}
 
 	async fn ibc_events(&self) -> Pin<Box<dyn Stream<Item = IbcEvent> + Send + 'static>> {
-		todo!()
+		let (tx, rx) = unbounded_channel();
+		let cluster = Cluster::from_str(&self.rpc_url).unwrap();
+		tokio::task::spawn_blocking(move || {
+			let (_logs_subscription, receiver) = PubsubClient::logs_subscribe(
+				cluster.ws_url(),
+				RpcTransactionLogsFilter::Mentions(vec![ID.to_string()]),
+				RpcTransactionLogsConfig { commitment: Some(CommitmentConfig::processed()) },
+			)
+			.unwrap();
+	
+			loop {
+				match receiver.recv() {
+					Ok(logs) => {
+						let events = get_events_from_logs(logs.value.logs);
+						events.iter().for_each(|event| tx.send(event.clone()).unwrap());
+					},
+					Err(err) => {
+						panic!("{}", format!("Disconnected: {err}"));
+					},
+				}
+			}
+		});
+	
+		let streams = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+		Box::pin(streams)
 	}
 
 	async fn query_client_consensus(
@@ -1219,11 +1247,39 @@ fn get_events_from_logs(logs: Vec<String>) -> Vec<IbcEvent> {
 	events
 }
 
-#[test]
-pub fn test_storage_deserialization() {
+async fn get_stream() -> Pin<Box<dyn Stream<Item = IbcEvent> + Send + 'static>> {
+	let (tx, mut rx) = unbounded_channel();
+	let cluster = Cluster::Localnet;
+	tokio::task::spawn_blocking(move || {
+		let (logs_listener, receiver) = PubsubClient::logs_subscribe(
+			"ws://127.0.0.1:8900",
+			RpcTransactionLogsFilter::Mentions(vec![ID.to_string()]),
+			RpcTransactionLogsConfig { commitment: Some(CommitmentConfig::processed()) },
+		)
+		.unwrap();
+
+		loop {
+			match receiver.recv() {
+				Ok(logs) => {
+					let events = get_events_from_logs(logs.value.logs);
+					events.iter().for_each(|event| tx.send(event.clone()).unwrap());
+				},
+				Err(err) => {
+					panic!("{}", format!("Disconnected: {err}"));
+				},
+			}
+		}
+	});
+
+	let streams = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+	Box::pin(streams)
+}
+
+#[tokio::test]
+async fn test_storage_deserialization() {
 	println!("How is this test, do you like it?");
 	let authority = Rc::new(Keypair::new());
-	let cluster = Cluster::Devnet;
+	let cluster = Cluster::Localnet;
 	let client = AnchorClient::new_with_options(
 		cluster.clone(),
 		authority.clone(),
@@ -1233,35 +1289,8 @@ pub fn test_storage_deserialization() {
 
 	// let storage = Pubkey::find_program_address(&[SOLANA_IBC_STORAGE_SEED], &ID).0;
 
-	let (logs_listener, receiver) = PubsubClient::logs_subscribe(
-		cluster.ws_url(),
-		RpcTransactionLogsFilter::Mentions(vec![system_program::ID.to_string()]),
-		RpcTransactionLogsConfig {
-			commitment: Some(CommitmentConfig::processed()),
-		},
-	).unwrap();
-
+	let mut streams = get_stream().await;
 	loop {
-		match receiver.recv() {
-				Ok(logs) => {
-						println!("Transaction executed in slot {}:", logs.context.slot);
-						println!("  Signature: {}", logs.value.signature);
-						println!(
-								"  Status: {}",
-								logs.value
-										.err
-										.map(|err| err.to_string())
-										.unwrap_or_else(|| "Ok".to_string())
-						);
-						println!("  Log Messages:");
-						for log in logs.value.logs {
-								println!("    {log}");
-						}
-				}
-				Err(err) => {
-						panic!("{}", format!("Disconnected: {err}"));
-				}
-		}
-}
-
+		println!("This is streams {:?}", streams.next().await);
+	}
 }
