@@ -5,22 +5,22 @@ use core::{
 };
 use ibc::{
 	core::{
+		events::{Error as IbcEventError, IbcEvent, IbcEventType},
 		ics02_client::{
-			error::Error as ClientError,
+			error::ClientError,
 			events::{self as client_events, Attributes as ClientAttributes},
-			height::{Height, HeightErrorDetail},
+			height::{Height, HeightError},
 		},
 		ics03_connection::{
-			error::Error as ConnectionError,
+			error::ConnectionError,
 			events::{self as connection_events, Attributes as ConnectionAttributes},
 		},
 		ics04_channel::{
-			error::Error as ChannelError,
+			error::ChannelError,
 			events::{self as channel_events, Attributes as ChannelAttributes},
 			packet::Packet,
 		},
 	},
-	events::{Error as IbcEventError, IbcEvent, IbcEventType},
 	protobuf::Protobuf,
 };
 use ics07_tendermint::client_message::{decode_header as tm_decode_header, Header};
@@ -58,7 +58,7 @@ pub fn event_is_type_client(ev: &IbcEvent) -> bool {
 			IbcEvent::UpdateClient(_) |
 			IbcEvent::UpgradeClient(_) |
 			IbcEvent::ClientMisbehaviour(_) |
-			IbcEvent::PushWasmCode(_)
+			// IbcEvent::PushWasmCode(_)
 	)
 }
 
@@ -86,7 +86,7 @@ pub fn event_is_type_channel(ev: &IbcEvent) -> bool {
 			IbcEvent::WriteAcknowledgement(_) |
 			IbcEvent::AcknowledgePacket(_) |
 			IbcEvent::TimeoutPacket(_) |
-			IbcEvent::TimeoutOnClosePacket(_)
+			// IbcEvent::TimeoutOnClosePacket(_)
 	)
 }
 
@@ -406,7 +406,7 @@ pub fn client_extract_attributes_from_tx(
 		}
 	}
 
-	if attr.height == Height::default() {
+	if attr.height == Height::min() {
 		attr.height = height;
 	}
 
@@ -439,17 +439,17 @@ fn connection_extract_attributes_from_tx(
 				attr.connection_id = value.parse().ok();
 			},
 			connection_events::CLIENT_ID_ATTRIBUTE_KEY => {
-				attr.client_id = value.parse().map_err(ConnectionError::invalid_identifier)?;
+				attr.client_id = value.parse().map_err(|e|ConnectionError::InvalidIdentifier(e))?;
 			},
 			connection_events::COUNTERPARTY_CONN_ID_ATTRIBUTE_KEY => {
 				attr.counterparty_connection_id = value.parse().ok();
 			},
 			connection_events::COUNTERPARTY_CLIENT_ID_ATTRIBUTE_KEY => {
 				attr.counterparty_client_id =
-					value.parse().map_err(ConnectionError::invalid_identifier)?;
+					value.parse().map_err(|e|ConnectionError::InvalidIdentifier(e))?;
 			},
 			connection_events::HEIGHT_ATTRIBUTE_KEY =>
-				attr.height = value.parse().map_err(ConnectionError::invalid_packet_height)?,
+				attr.height = value.parse().map_err(ConnectionError::InvalidConsensusHeight)?,
 			_ => {},
 		}
 	}
@@ -543,9 +543,9 @@ fn extract_packet_and_write_ack_from_tx(
 pub fn parse_timeout_height(s: &str) -> Result<TimeoutHeight, ChannelError> {
 	match s.parse::<Height>() {
 		Ok(height) => Ok(Some(height)),
-		Err(e) => match e.into_detail() {
-			HeightErrorDetail::HeightConversion(x) if x.height == "0" => Ok(None),
-			_ => Err(ChannelError::invalid_timeout_height()),
+		Err(e) => match e {
+			HeightError::HeightConversion{ height, error } if height == "0" => Ok(None),
+			_ => Err(ChannelError::MissingHeight),
 		},
 	}
 }

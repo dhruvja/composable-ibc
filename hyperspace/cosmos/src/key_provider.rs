@@ -29,7 +29,7 @@ impl KeyEntry {
 }
 
 impl<H> KeyProvider for CosmosClient<H> {
-	fn account_id(&self) -> ibc::signer::Signer {
+	fn account_id(&self) -> ibc::Signer {
 		let key_entry = self.keybase.clone();
 		let address = hex::encode(key_entry.address);
 		let account = AccountId::from_str(address.as_str())
@@ -40,9 +40,6 @@ impl<H> KeyProvider for CosmosClient<H> {
 				.map_err(|e| Error::from(format!("Could not encode account id {e}")))
 				.unwrap();
 
-		bech32
-			.parse()
-			.map_err(|e| Error::from(format!("Could not parse account id {e}")))
-			.unwrap()
+		ibc::Signer::from(bech32)
 	}
 }

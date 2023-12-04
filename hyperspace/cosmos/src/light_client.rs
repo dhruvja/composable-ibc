@@ -60,7 +60,7 @@ impl LightClient {
 
 	pub fn prepare_state(&self, trusted: Height) -> Result<LightClientState, Error> {
 		let trusted_height =
-			TMHeight::try_from(trusted.revision_height).map_err(|e| Error::from(e.to_string()))?;
+			TMHeight::try_from(trusted.revision_height()).map_err(|e| Error::from(e.to_string()))?;
 
 		use tendermint_light_client::components::io::Io;
 		let trusted_block = self
@@ -80,7 +80,7 @@ impl LightClient {
 		client_state: &ClientState<HostFunctionsManager>,
 	) -> Result<LightBlock, Error> {
 		let target_height =
-			TMHeight::try_from(target.revision_height).map_err(|e| Error::from(e.to_string()))?;
+			TMHeight::try_from(target.revision_height()).map_err(|e| Error::from(e.to_string()))?;
 
 		let client = self.prepare_tendermint_light_client(client_state)?;
 		let mut state = self.prepare_state(trusted)?;

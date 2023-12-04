@@ -3,9 +3,8 @@ use crate::error::Error;
 use core::pin::Pin;
 use futures::{Stream, StreamExt};
 use ibc::{
-	applications::transfer::{msgs::transfer::MsgTransfer, PrefixedCoin},
-	core::ics24_host::identifier::ChannelId,
-	tx_msg::Msg,
+	applications::transfer::msgs::transfer::MsgTransfer,
+	core::ics24_host::identifier::ChannelId, proto::Any,
 };
 use primitives::TestProvider;
 use tendermint_rpc::{
@@ -20,8 +19,8 @@ where
 	H: Clone + Send + Sync + 'static,
 {
 	/// Initiate an ibc transfer on chain.
-	async fn send_transfer(&self, msg: MsgTransfer<PrefixedCoin>) -> Result<(), Self::Error> {
-		let hash = self.submit_call(vec![msg.to_any()]).await?;
+	async fn send_transfer(&self, msg: MsgTransfer) -> Result<(), Self::Error> {
+		let hash = self.submit_call(vec![Any::from(msg)]).await?;
 		log::info!(target: "hyperspace_cosmos", "🤝 Transfer transaction confirmed with hash: {:?}", hash);
 		Ok(())
 	}

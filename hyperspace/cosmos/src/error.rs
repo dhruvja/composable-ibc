@@ -1,4 +1,4 @@
-use ibc::timestamp::ParseTimestampError;
+use ibc::{core::timestamp::ParseTimestampError, applications::transfer::error::TokenTransferError};
 use prost::DecodeError;
 
 /// Error definitions for the cosmos client in accordance with the parachain's Error type.
@@ -21,7 +21,7 @@ pub enum Error {
 	ParseTimestampError(#[from] ParseTimestampError),
 	/// Transfer error
 	#[error("IBC transfer error: {0}")]
-	TransferError(#[from] ibc::applications::transfer::error::Error),
+	TransferError(#[from] TokenTransferError),
 	/// Tendermint error
 	#[error("Tendermint error: {0}")]
 	TendermintError(#[from] tendermint::Error),

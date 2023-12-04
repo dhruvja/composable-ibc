@@ -36,8 +36,10 @@ quick_cache = "0.3.0"
 rand = "0.8.5"
 
 # composable
-ibc = { path = "../../ibc/modules", features = [] }
-ibc-proto = { path = "../../ibc/proto" }
+ibc = { version = "0.47.0", default-features = false, features = ["borsh", "serde"],package="ibc" }
+ibc-proto = { version = "0.37.1", default-features = false, features = ["client", "serde"] }
+# ibc = { path = "../../ibc/modules", features = [] }
+ibc-proto-old = { path = "../../ibc/proto", package="ibc-proto" }
 ibc-primitives = { path = "../../contracts/pallet-ibc/primitives" }
 ics07-tendermint = { path = "../../light-clients/ics07-tendermint" }
 ics08-wasm = { path = "../../light-clients/ics08-wasm" }
@@ -45,6 +47,9 @@ ibc-rpc = { path = "../../contracts/pallet-ibc/rpc" }
 pallet-ibc = { path = "../../contracts/pallet-ibc" }
 
 tracing = "0.1.36"
+
+#Contract
+solana-ibc = { git = "https://github.com/ComposableFi/emulated-light-client.git", branch="mpn/d", features = ["mocks"]}
 
 # tendermint
 tendermint = { git = "https://github.com/informalsystems/tendermint-rs", rev = "e81f7bf23d63ffbcd242381d1ce5e35da3515ff1", default-features = false, features = [

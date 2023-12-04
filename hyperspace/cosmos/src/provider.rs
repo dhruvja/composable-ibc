@@ -13,24 +13,25 @@ use futures::{
 use ibc::{
 	applications::transfer::{Amount, BaseDenom, PrefixedCoin, PrefixedDenom, TracePath},
 	core::{
+		events::IbcEvent,
+		// protobuf::Protobuf,
+		timestamp::Timestamp,
+		// tx_msg::Msg,
 		ics02_client::{
-			client_state::ClientType, events as ClientEvents,
-			msgs::update_client::MsgUpdateAnyClient, trust_threshold::TrustThreshold,
+			client_type::ClientType, events as ClientEvents,
+			msgs::update_client::MsgUpdateClient,
+			trust_threshold::TrustThreshold,
 		},
 		ics04_channel::packet::Sequence,
 		ics23_commitment::{commitment::CommitmentPrefix, specs::ProofSpecs},
 		ics24_host::{
 			identifier::{ChainId, ChannelId, ClientId, ConnectionId, PortId},
 			path::{
-				AcksPath, ChannelEndsPath, ClientConsensusStatePath, ClientStatePath,
-				CommitmentsPath, ConnectionsPath, Path, ReceiptsPath, SeqRecvsPath,
+				AckPath, ChannelEndPath, ClientConsensusStatePath, ClientStatePath,
+				CommitmentPath, ConnectionPath, Path, ReceiptPath, SeqRecvPath,
 			},
-		},
+		}, Msg,
 	},
-	events::IbcEvent,
-	protobuf::Protobuf,
-	timestamp::Timestamp,
-	tx_msg::Msg,
 	Height,
 };
 use ibc_primitives::PacketInfo as IbcPacketInfo;
@@ -51,7 +52,7 @@ use ibc_proto::{
 		connection::v1::{
 			ConnectionEnd, IdentifiedConnection, QueryConnectionResponse, QueryConnectionsRequest,
 		},
-	},
+	}, protobuf::Protobuf,
 };
 use ibc_rpc::PacketInfo;
 use ics07_tendermint::{
@@ -59,10 +60,11 @@ use ics07_tendermint::{
 };
 use ics08_wasm::msg::MsgPushNewWasmCode;
 use pallet_ibc::light_clients::{
-	AnyClientMessage, AnyClientState, AnyConsensusState, HostFunctionsManager,
+	AnyClientMessage, HostFunctionsManager,
 };
+use solana_ibc::{client_state::AnyClientState, consensus_state::AnyConsensusState};
 use primitives::{
-	filter_events_by_ids, mock::LocalClientTypes, Chain, IbcProvider, KeyProvider, UpdateType,
+	filter_events_by_ids, Chain, IbcProvider, KeyProvider, UpdateType,
 };
 use prost::Message;
 use rand::Rng;
@@ -127,7 +129,7 @@ where
 				.map_err(|_| Error::Custom("failed to decode client state response".to_string()))?;
 		let latest_cp_client_height = client_state.latest_height().revision_height;
 		let latest_height = self.latest_height_and_timestamp().await?.0;
-		let latest_revision = latest_height.revision_number;
+		let latest_revision = latest_height.revision_number();
 
 		let from = TmHeight::try_from(latest_cp_client_height).unwrap();
 		let to = finality_event_height.min(
@@ -182,16 +184,14 @@ where
 		{
 			let height = update_header.height();
 			let update_client_header = {
-				let msg = MsgUpdateAnyClient::<LocalClientTypes> {
+				let msg = MsgUpdateClient {
 					client_id: client_id.clone(),
 					client_message: AnyClientMessage::Tendermint(ClientMessage::Header(
 						update_header,
 					)),
 					signer: counterparty.account_id(),
 				};
-				let value = msg.encode_vec().map_err(|e| {
-					Error::from(format!("Failed to encode MsgUpdateClient {msg:?}: {e:?}"))
-				})?;
+				let value = msg.encode_vec();
 				Any { value, type_url: msg.type_url() }
 			};
 			updates.push((update_client_header, height, events, update_type));
@@ -234,9 +234,9 @@ where
 						if query == Query::from(EventType::NewBlock).to_string() =>
 					{
 						let height = Height::new(
-							ChainId::chain_version(chain_id.to_string().as_str()),
+							ChainId::revision_number(&chain_id),
 							u64::from(block.as_ref().ok_or("tx.height").unwrap().header.height),
-						);
+						).unwrap();
 						events_with_height.push(IbcEventWithHeight::new(
 							ClientEvents::NewBlock::new(height).into(),
 							height,
@@ -244,9 +244,9 @@ where
 					},
 					EventData::Tx { tx_result } => {
 						let height = Height::new(
-							ChainId::chain_version(chain_id.to_string().as_str()),
+							ChainId::revision_number(&chain_id),
 							tx_result.height as u64,
-						);
+						).unwrap();
 						for abci_event in &tx_result.result.events {
 							if let Ok(ibc_event) = ibc_event_try_from_abci_event(abci_event, height)
 							{
@@ -290,8 +290,8 @@ where
 	) -> Result<QueryConsensusStateResponse, Self::Error> {
 		let path_bytes = Path::ClientConsensusState(ClientConsensusStatePath {
 			client_id: client_id.clone(),
-			epoch: consensus_height.revision_number,
-			height: consensus_height.revision_height,
+			epoch: consensus_height.revision_number(),
+			height: consensus_height.revision_height(),
 		})
 		.to_string()
 		.into_bytes();
@@ -312,7 +312,7 @@ where
 		let path_bytes =
 			Path::ClientState(ClientStatePath(client_id.clone())).to_string().into_bytes();
 		let (q, proof) = self.query_path(path_bytes.clone(), at, true).await?;
-		let client_state = Any::decode(&*q.value)?;
+		let client_state = Any::decode(q.value).unwrap();
 		Ok(QueryClientStateResponse {
 			client_state: Some(client_state),
 			proof,
@@ -325,7 +325,7 @@ where
 		at: Height,
 		connection_id: ConnectionId,
 	) -> Result<QueryConnectionResponse, Self::Error> {
-		let path_bytes = Path::Connections(ConnectionsPath(connection_id.clone()))
+		let path_bytes = Path::Connection(ConnectionPath(connection_id.clone()))
 			.to_string()
 			.into_bytes();
 		let (q, proof) = self.query_path(path_bytes.clone(), at, true).await?;
@@ -343,7 +343,7 @@ where
 		channel_id: ChannelId,
 		port_id: PortId,
 	) -> Result<QueryChannelResponse, Self::Error> {
-		let path_bytes = Path::ChannelEnds(ChannelEndsPath(port_id.clone(), channel_id))
+		let path_bytes = Path::ChannelEnd(ChannelEndPath(port_id.clone(), channel_id))
 			.to_string()
 			.into_bytes();
 		let (q, proof) = self.query_path(path_bytes.clone(), at, true).await?;
@@ -367,7 +367,7 @@ where
 		channel_id: &ChannelId,
 		seq: u64,
 	) -> Result<QueryPacketCommitmentResponse, Self::Error> {
-		let path_bytes = Path::Commitments(CommitmentsPath {
+		let path_bytes = Path::Commitment(CommitmentPath {
 			port_id: port_id.clone(),
 			channel_id: *channel_id,
 			sequence: Sequence::from(seq),
@@ -389,7 +389,7 @@ where
 		channel_id: &ChannelId,
 		seq: u64,
 	) -> Result<QueryPacketAcknowledgementResponse, Self::Error> {
-		let path_bytes = Path::Acks(AcksPath {
+		let path_bytes = Path::Ack(AckPath {
 			port_id: port_id.clone(),
 			channel_id: *channel_id,
 			sequence: Sequence::from(seq),
@@ -410,7 +410,7 @@ where
 		port_id: &PortId,
 		channel_id: &ChannelId,
 	) -> Result<QueryNextSequenceReceiveResponse, Self::Error> {
-		let path_bytes = Path::SeqRecvs(SeqRecvsPath(port_id.clone(), *channel_id))
+		let path_bytes = Path::SeqRecv(SeqRecvPath(port_id.clone(), *channel_id))
 			.to_string()
 			.into_bytes();
 		let (query_result, proof) = self.query_path(path_bytes.clone(), at, true).await?;
@@ -434,7 +434,7 @@ where
 		channel_id: &ChannelId,
 		seq: u64,
 	) -> Result<QueryPacketReceiptResponse, Self::Error> {
-		let path_bytes = Path::Receipts(ReceiptsPath {
+		let path_bytes = Path::Receipt(ReceiptPath {
 			port_id: port_id.clone(),
 			channel_id: *channel_id,
 			sequence: Sequence::from(seq),
@@ -479,7 +479,7 @@ where
 		})?;
 
 		let height = Height::new(
-			ChainId::chain_version(latest_app_block.header.chain_id.as_str()),
+			ChainId::revision_number(&latest_app_block.header.chain_id),
 			u64::from(abci_info.last_block_height),
 		);
 		let timestamp = latest_app_block.header.time.into();
@@ -689,16 +689,16 @@ where
 				for ev in &tx.tx_result.events {
 					let height = tx.height.value();
 					let ev =
-						ibc_event_try_from_abci_event(ev, Height::new(self.id().version(), height));
+						ibc_event_try_from_abci_event(ev, Height::new(self.id().revision_number(), height).unwrap());
 
 					match ev {
 						Ok(IbcEvent::SendPacket(p))
-							if seqs.contains(&p.packet.sequence.0) &&
-								p.packet.source_port == port_id && p.packet.source_channel ==
-								channel_id =>
+							if seqs.contains(&p.seq_on_a().clone().into()) &&
+								p.port_id_on_a() == &port_id && p.chan_id_on_a() ==
+								&channel_id =>
 						{
-							let seq = p.packet.sequence.0;
-							let mut info = PacketInfo::try_from(IbcPacketInfo::from(p.packet))
+							let seq = p.seq_on_a();
+							let mut info = PacketInfo::try_from(IbcPacketInfo::from(p.packet_data()))
 								.map_err(|_| {
 									Error::from(
 										"failed to convert packet info from IbcPacketInfo"
@@ -767,28 +767,28 @@ where
 				for ev in &tx.tx_result.events {
 					let height = tx.height.value();
 					let ev =
-						ibc_event_try_from_abci_event(ev, Height::new(self.id().version(), height));
+						ibc_event_try_from_abci_event(ev, Height::new(self.id().revision_number(), height).unwrap());
 
 					match ev {
 						Ok(IbcEvent::WriteAcknowledgement(p))
-							if seqs.contains(&p.packet.sequence.0) &&
-								p.packet.destination_port == port_id &&
-								p.packet.destination_channel == channel_id =>
+							if seqs.contains(&p.seq_on_a().clone().into()) &&
+								p.port_id_on_b() == &port_id &&
+								p.chan_id_on_b() == &channel_id =>
 						{
-							let seq = p.packet.sequence.0;
-							let mut info = PacketInfo::try_from(IbcPacketInfo::from(p.packet))
+							let seq: u64 = p.seq_on_a().clone().into();
+							let mut info = PacketInfo::try_from(IbcPacketInfo::from(p.packet_data()))
 								.map_err(|_| {
 									Error::from(
 										"failed to convert packet info from IbcPacketInfo"
 											.to_string(),
 									)
 								})?;
-							info.ack = Some(p.ack);
-							info.height = Some(p.height.revision_height);
+							info.ack = Some(p.acknowledgement().as_bytes().to_vec());
+							info.height = Some(p.timeout_height_on_b().commitment_revision_height());
 							let entry = block_events.entry(seq);
 							match entry {
 								Entry::Occupied(mut packet) => {
-									if packet.get().height.unwrap() <= p.height.revision_height {
+									if packet.get().height.unwrap() <= info.height.unwrap() {
 										packet.insert(info);
 									}
 								},
@@ -840,12 +840,12 @@ where
 			for ev in &tx.tx_result.events {
 				let height = tx.height.value();
 				let ev =
-					ibc_event_try_from_abci_event(ev, Height::new(self.id().version(), height));
+					ibc_event_try_from_abci_event(ev, Height::new(self.id().revision_number(), height).unwrap());
 				let timestamp = self.query_timestamp_at(height).await?;
 				match ev {
 					Ok(IbcEvent::UpdateClient(e)) if e.client_id() == &client_id =>
 						return Ok((
-							Height::new(self.chain_id.version(), height),
+							Height::new(self.chain_id.revision_number(), height).unwrap(),
 							Timestamp::from_nanoseconds(timestamp)?,
 						)),
 					_ => (),
@@ -940,8 +940,8 @@ where
 			.block(height)
 			.await
 			.map_err(|e| Error::RpcError(e.to_string()))?;
-		let time: Timestamp = response.block.header.time.into();
-		Ok(time.nanoseconds())
+		let time = response.block.header.time.unix_timestamp_nanos();
+		Ok(time.try_into().unwrap())
 	}
 
 	async fn query_clients(&self) -> Result<Vec<ClientId>, Self::Error> {
@@ -1105,9 +1105,9 @@ where
 		};
 
 		let height = Height::new(
-			ChainId::chain_version(self.chain_id.to_string().as_str()),
+			ChainId::revision_number(&self.chain_id),
 			response.height.value(),
-		);
+		).unwrap();
 		let deliver_tx_result = response.tx_result;
 		if deliver_tx_result.code.is_err() {
 			Err(Error::from(format!(
@@ -1172,7 +1172,7 @@ where
 		};
 
 		let height = Height::new(
-			ChainId::chain_version(self.chain_id.to_string().as_str()),
+			ChainId::revision_number(&self.chain_id),
 			response.height.value(),
 		);
 		let deliver_tx_result = response.tx_result;
@@ -1185,7 +1185,7 @@ where
 			let result = deliver_tx_result
 				.events
 				.iter()
-				.flat_map(|e| ibc_event_try_from_abci_event(e, height).ok().into_iter())
+				.flat_map(|e| ibc_event_try_from_abci_event(e, height.unwrap()).ok().into_iter())
 				.filter(|e| matches!(e, IbcEvent::OpenInitConnection(_)))
 				.collect::<Vec<_>>();
 			if result.len() != 1 {
@@ -1196,7 +1196,7 @@ where
 			} else {
 				Ok(match result[0] {
 					IbcEvent::OpenInitConnection(ref e) =>
-						e.connection_id().expect("Connection id wasn't found").clone(),
+						e.conn_id_on_a().clone(),
 					_ => unreachable!(),
 				})
 			}
@@ -1240,7 +1240,7 @@ where
 		};
 
 		let height = Height::new(
-			ChainId::chain_version(self.chain_id.to_string().as_str()),
+			ChainId::revision_number(&self.chain_id),
 			response.height.value(),
 		);
 		let deliver_tx_result = response.tx_result;
@@ -1264,7 +1264,7 @@ where
 			} else {
 				Ok(match result[0] {
 					IbcEvent::OpenInitChannel(ref e) =>
-						(*e.channel_id().expect("Channel id wasn't found"), e.port_id().clone()),
+						(*e.chan_id_on_a().expect("Channel id wasn't found"), e.port_id_on_a().clone()),
 					_ => unreachable!(),
 				})
 			}
@@ -1276,14 +1276,14 @@ where
 		let hash = self.submit(vec![msg.into()]).await?;
 		let resp = self.wait_for_tx_result(hash).await?;
 		let height = Height::new(
-			ChainId::chain_version(self.chain_id.to_string().as_str()),
+			ChainId::revision_number(&self.chain_id),
 			resp.height.value(),
 		);
 		let deliver_tx_result = resp.tx_result;
 		let mut result = deliver_tx_result
 			.events
 			.iter()
-			.flat_map(|e| ibc_event_try_from_abci_event(e, height).ok().into_iter())
+			.flat_map(|e| ibc_event_try_from_abci_event(e, height.unwrap()).ok().into_iter())
 			.filter(|e| matches!(e, IbcEvent::PushWasmCode(_)))
 			.collect::<Vec<_>>();
 		let code_id = if result.len() != 1 {
@@ -1342,14 +1342,14 @@ where
 		let end_events = block_results.end_block_events.unwrap_or_default().into_iter();
 		let events = begin_events.chain(tx_events).chain(end_events);
 
-		let ibc_height = Height::new(latest_revision, height);
+		let ibc_height = Height::new(latest_revision, height).unwrap();
 		for event in events {
 			let mut channel_and_port_ids = self.channel_whitelist();
 			channel_and_port_ids.extend(counterparty.channel_whitelist());
 
 			let ibc_event = ibc_event_try_from_abci_event(&event, ibc_height).ok();
 			match ibc_event {
-				Some(mut ev) => {
+				Some(ev) => {
 					let is_filtered = filter_events_by_ids(
 						&ev,
 						&[self.client_id(), counterparty.client_id()],
@@ -1361,7 +1361,7 @@ where
 					);
 
 					if is_filtered {
-						ev.set_height(ibc_height);
+						// ev.set_height(ibc_height);
 						log::debug!(target: "hyperspace_cosmos", "Encountered event at {height}: {:?}", event.kind);
 						ibc_events.push(ev);
 					} else {

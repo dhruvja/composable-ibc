@@ -3,11 +3,11 @@ use crate::{error::Error, events::client_extract_attributes_from_tx, provider::F
 use futures::{Stream, StreamExt};
 use ibc::{
 	core::{
+		events::IbcEvent,
 		ics02_client::{events::UpdateClient, msgs::ClientMsg},
 		ics24_host::identifier::ChainId,
-		ics26_routing::msgs::Ics26Envelope,
+		MsgEnvelope
 	},
-	events::IbcEvent,
 	Height,
 };
 use ibc_proto::{
@@ -19,7 +19,7 @@ use ibc_proto::{
 };
 use pallet_ibc::light_clients::AnyClientMessage;
 use primitives::{
-	mock::LocalClientTypes, Chain, CommonClientState, IbcProvider, LightClientSync,
+	Chain, CommonClientState, IbcProvider, LightClientSync,
 	MisbehaviourHandler,
 };
 use prost::Message;
@@ -80,7 +80,7 @@ where
 		let mut current_len = body_bytes_len;
 
 		for message in messages {
-			let message_len = message.encoded_len();
+			let message_len = message.value.encoded_len();
 
 			// The total length the message adds to the encoding includes the
 			// field tag (small varint) and the length delimiter.
@@ -142,7 +142,7 @@ where
 		update: UpdateClient,
 	) -> Result<AnyClientMessage, Self::Error> {
 		let query_str = Query::eq("update_client.client_id", update.client_id().to_string())
-			.and_eq("update_client.client_type", update.client_type())
+			.and_eq("update_client.client_type", update.client_type().to_string())
 			.and_eq("update_client.consensus_heights", update.consensus_height().to_string());
 		// omit this field since the first three should be enough to identify the update
 		// .and_eq("update_client.header", hex::encode(&update.header.unwrap_or_default()))
@@ -186,7 +186,7 @@ where
 				};
 				let attr = client_extract_attributes_from_tx(
 					&event,
-					Height::new(self.id().version(), tx_response.height as u64),
+					Height::new(self.id().revision_number(), tx_response.height as u64).unwrap(),
 				)
 				.map_err(|e| Error::from(format!("Failed to extract attributes from tx: {e}")))?;
 				if attr.client_id == *update.client_id() &&
@@ -212,8 +212,8 @@ where
 			})?
 			.messages
 			.remove(idx as usize);
-		let envelope = Ics26Envelope::<LocalClientTypes>::try_from(x);
-		if let Ok(Ics26Envelope::Ics2Msg(ClientMsg::UpdateClient(update_msg))) = envelope {
+		let envelope = MsgEnvelope::try_from(x);
+		if let Ok(MsgEnvelope::Client(ClientMsg::UpdateClient(update_msg))) = envelope {
 			return Ok(update_msg.client_message)
 		}
 

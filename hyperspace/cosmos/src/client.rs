@@ -9,14 +9,13 @@ use bech32::ToBase32;
 use bip32::{DerivationPath, ExtendedPrivateKey, XPrv, XPub as ExtendedPublicKey};
 use core::convert::{From, Into, TryFrom};
 use digest::Digest;
-use ibc::core::{
+use ibc::{core::{
 	ics02_client::height::Height,
 	ics23_commitment::commitment::{CommitmentPrefix, CommitmentProofBytes},
 	ics24_host::{
 		identifier::{ChainId, ChannelId, ClientId, ConnectionId, PortId},
-		IBC_QUERY_PATH,
 	},
-};
+}, hosts::tendermint::IBC_QUERY_PATH};
 use ibc_proto::{
 	cosmos::auth::v1beta1::{query_client::QueryClient, BaseAccount, QueryAccountRequest},
 	google::protobuf::Any,
@@ -25,7 +24,8 @@ use ics07_tendermint::{
 	client_message::Header, client_state::ClientState, consensus_state::ConsensusState,
 	merkle::convert_tm_to_ics_merkle_proof,
 };
-use pallet_ibc::light_clients::{AnyClientState, AnyConsensusState, HostFunctionsManager};
+use pallet_ibc::light_clients::HostFunctionsManager;
+use solana_ibc::{AnyClientState, AnyConsensusState}
 use primitives::{
 	Chain, CommonClientConfig, CommonClientState, IbcProvider, KeyProvider, UpdateType,
 };
@@ -263,7 +263,7 @@ where
 			.await
 			.map_err(|e| Error::RpcError(format!("{:?}", e)))?;
 
-		let chain_id = ChainId::from(config.chain_id);
+		let chain_id = ChainId::from_str(&config.chain_id).map_err(|e| e.to_string())?;
 		let light_client =
 			LightClient::init_light_client(config.rpc_url.clone(), Duration::from_secs(10)).await?;
 		let commitment_prefix = CommitmentPrefix::try_from(config.store_prefix.as_bytes().to_vec())
@@ -418,7 +418,7 @@ where
 						client.fetch_light_block_with_cache(height.try_into()?, duration).await?;
 
 					let height =
-						TmHeight::try_from(trusted_height.revision_height).map_err(|e| {
+						TmHeight::try_from(trusted_height.revision_height()).map_err(|e| {
 							Error::from(format!(
 								"Failed to convert height for chain {:?} with error {:?}",
 								client.name, e
@@ -487,7 +487,7 @@ where
 		prove: bool,
 	) -> Result<(AbciQuery, Vec<u8>), Error> {
 		let path = IBC_QUERY_PATH;
-		let height = TmHeight::try_from(height_query.revision_height)
+		let height = TmHeight::try_from(height_query.revision_height())
 			.map_err(|e| Error::from(format!("Invalid height {}", e)))?;
 
 		let height = match height.value() {
@@ -527,7 +527,7 @@ where
 			.transpose()
 			.map_err(|_| Error::Custom(format!("bad client state proof")))?
 			.ok_or_else(|| Error::Custom(format!("proof not found")))?;
-		let proof = CommitmentProofBytes::try_from(merkle_proof)
+		let proof = CommitmentProofBytes::try_from(RawMerkleProof::from(merkle_proof))
 			.map_err(|err| Error::Custom(format!("bad client state proof: {}", err)))?;
 		Ok((response, proof.into()))
 	}
